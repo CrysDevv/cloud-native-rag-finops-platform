@@ -2,7 +2,7 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.responses import JSONResponse, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from sqlalchemy import text
@@ -12,6 +12,7 @@ from config import get_settings
 from database import crear_engine, crear_redis, crear_sessionmaker
 from middleware import configurar_logging, registrar_middlewares
 from routers import router_documentos, router_finops, router_rag
+from seguridad import exigir_api_key
 
 settings = get_settings()
 configurar_logging(settings.log_level)
@@ -56,9 +57,9 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="cloud-native-rag-finops-platform", version="0.2.0", lifespan=lifespan)
 registrar_middlewares(app)
 _configurar_otel(app)
-app.include_router(router_documentos)
-app.include_router(router_rag)
-app.include_router(router_finops)
+app.include_router(router_documentos, dependencies=[Depends(exigir_api_key)])
+app.include_router(router_rag, dependencies=[Depends(exigir_api_key)])
+app.include_router(router_finops, dependencies=[Depends(exigir_api_key)])
 
 
 async def _chequear(coro) -> str:
