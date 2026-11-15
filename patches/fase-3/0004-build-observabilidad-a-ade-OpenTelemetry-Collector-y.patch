@@ -1,0 +1,97 @@
+From f40150fe3648b3a1d60341ed38a150f728254a2b Mon Sep 17 00:00:00 2001
+From: CrysDevv <cryssdev@gmail.com>
+Date: Sun, 15 Nov 2026 15:09:14 -0300
+Subject: [PATCH 4/4] =?UTF-8?q?build(observabilidad):=20a=C3=B1ade=20OpenT?=
+ =?UTF-8?q?elemetry=20Collector=20y=20composici=C3=B3n=20de=20monitoreo=20?=
+ =?UTF-8?q?endurecida?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ docker-compose.monitoring.yml                 | 38 +++++++++++++++++++
+ .../otel-collector/otel-collector-config.yaml | 27 +++++++++++++
+ 2 files changed, 65 insertions(+)
+ create mode 100644 docker-compose.monitoring.yml
+ create mode 100644 monitoring/otel-collector/otel-collector-config.yaml
+
+diff --git a/docker-compose.monitoring.yml b/docker-compose.monitoring.yml
+new file mode 100644
+index 0000000..afb60fc
+--- /dev/null
++++ b/docker-compose.monitoring.yml
+@@ -0,0 +1,38 @@
++# Uso: docker compose -f docker-compose.yml -f docker-compose.worker.yml -f docker-compose.monitoring.yml up -d --build
++services:
++  prometheus:
++    image: prom/prometheus:v2.55.1
++    container_name: rag-prometheus
++    command:
++      - "--config.file=/etc/prometheus/prometheus.yml"
++      - "--storage.tsdb.path=/prometheus"
++      - "--storage.tsdb.retention.time=7d"
++    volumes:
++      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
++      - ./monitoring/prometheus/alert-rules.yml:/etc/prometheus/alert-rules.yml:ro
++      - prometheus_data:/prometheus
++    ports:
++      - "127.0.0.1:9090:9090"
++    read_only: true
++    cap_drop: [ALL]
++    security_opt:
++      - no-new-privileges:true
++    restart: unless-stopped
++
++  otel-collector:
++    image: otel/opentelemetry-collector-contrib:0.115.1
++    container_name: rag-otel-collector
++    command: ["--config=/etc/otelcol/config.yaml"]
++    volumes:
++      - ./monitoring/otel-collector/otel-collector-config.yaml:/etc/otelcol/config.yaml:ro
++    expose:
++      - "4317"
++      - "4318"
++    read_only: true
++    cap_drop: [ALL]
++    security_opt:
++      - no-new-privileges:true
++    restart: unless-stopped
++
++volumes:
++  prometheus_data:
+diff --git a/monitoring/otel-collector/otel-collector-config.yaml b/monitoring/otel-collector/otel-collector-config.yaml
+new file mode 100644
+index 0000000..ed90a53
+--- /dev/null
++++ b/monitoring/otel-collector/otel-collector-config.yaml
+@@ -0,0 +1,27 @@
++receivers:
++  otlp:
++    protocols:
++      grpc:
++        endpoint: 0.0.0.0:4317
++      http:
++        endpoint: 0.0.0.0:4318
++
++processors:
++  memory_limiter:
++    check_interval: 5s
++    limit_mib: 256
++    spike_limit_mib: 64
++  batch:
++    timeout: 5s
++    send_batch_size: 512
++
++exporters:
++  debug:
++    verbosity: basic
++
++service:
++  pipelines:
++    traces:
++      receivers: [otlp]
++      processors: [memory_limiter, batch]
++      exporters: [debug]
+-- 
+2.55.0.windows.2
+

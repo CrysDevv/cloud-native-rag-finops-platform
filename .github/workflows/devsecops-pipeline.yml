@@ -1,0 +1,108 @@
+name: devsecops-pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: devsecops-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  calidad-y-pruebas:
+    name: Calidad y pruebas unitarias
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: services/api-fastapi/requirements-dev.txt
+      - name: Instalar dependencias
+        run: pip install -r services/api-fastapi/requirements-dev.txt ruff
+      - name: Lint (errores de sintaxis y nombres indefinidos)
+        run: ruff check services/api-fastapi --select E9,F63,F7,F82
+      - name: Pruebas unitarias
+        working-directory: services/api-fastapi
+        run: python -m pytest tests -q
+
+  sast-y-dependencias:
+    name: SAST y auditoría de dependencias
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Bandit (severidad media o superior)
+        run: |
+          pip install bandit
+          bandit -r services/api-fastapi -x services/api-fastapi/tests -ll
+      - name: Auditoría de dependencias (informativa; revisar hallazgos)
+        continue-on-error: true
+        run: |
+          pip install pip-audit
+          pip-audit -r services/api-fastapi/requirements.txt
+
+  secretos:
+    name: Detección de secretos
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  imagen-docker:
+    name: Imagen Docker (hadolint + Trivy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: docker/Dockerfile.python312
+          failure-threshold: error
+      - uses: docker/setup-buildx-action@v3
+      - name: Construir imagen
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.python312
+          load: true
+          push: false
+          tags: rag-api:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Escaneo Trivy (HIGH y CRITICAL con corrección disponible)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: rag-api:ci
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          vuln-type: os,library
+
+  iac-y-compose:
+    name: Terraform y Docker Compose
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - name: Terraform fmt y validate
+        working-directory: infra/terraform
+        run: |
+          terraform fmt -check -recursive
+          terraform init -backend=false -input=false
+          terraform validate
+      - name: Validar composición de servicios
+        run: |
+          cp .env.example .env
+          docker compose -f docker-compose.yml -f docker-compose.worker.yml -f docker-compose.monitoring.yml config -q
