@@ -1,0 +1,27 @@
+From 0033c9e24c77a87a92129d9e0bc03cd5e5573646 Mon Sep 17 00:00:00 2001
+From: CrysDevv <cryssdev@gmail.com>
+Date: Sun, 15 Nov 2026 15:44:00 -0300
+Subject: [PATCH 6/6] =?UTF-8?q?docs:=20a=C3=B1adido=20.venv?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ .gitignore | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/.gitignore b/.gitignore
+index 00ebeb9..84c9ab6 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -26,6 +26,7 @@ crash.log
+ !terraform.tfvars.example
+ 
+ # Entorno y secretos
++.venv
+ .env
+ .env.local
+ *.pem
+-- 
+2.55.0.windows.2
+

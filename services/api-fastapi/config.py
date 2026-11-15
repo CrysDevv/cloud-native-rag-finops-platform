@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     correlation_id_header: str = "X-Correlation-ID"
 
     max_upload_mb: int = 25
+    api_keys_sha256: str = ""
     cache_ttl_segundos: int = 3600
     semantic_cache_umbral: float = 0.97
     semantic_cache_max_entradas: int = 200

@@ -1,0 +1,110 @@
+From ae05ce751587f98f1a6c186dd636d5d4580204aa Mon Sep 17 00:00:00 2001
+From: CrysDevv <cryssdev@gmail.com>
+Date: Sun, 15 Nov 2026 15:42:20 -0300
+Subject: [PATCH 1/6] =?UTF-8?q?feat(seguridad):=20a=C3=B1ade=20autenticaci?=
+ =?UTF-8?q?=C3=B3n=20por=20API=20key=20con=20hash=20SHA-256=20y=20comparac?=
+ =?UTF-8?q?i=C3=B3n=20en=20tiempo=20constante?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ services/api-fastapi/config.py    |  1 +
+ services/api-fastapi/main.py      |  9 ++++----
+ services/api-fastapi/seguridad.py | 38 +++++++++++++++++++++++++++++++
+ 3 files changed, 44 insertions(+), 4 deletions(-)
+ create mode 100644 services/api-fastapi/seguridad.py
+
+diff --git a/services/api-fastapi/config.py b/services/api-fastapi/config.py
+index 1ca2740..0620d33 100644
+--- a/services/api-fastapi/config.py
++++ b/services/api-fastapi/config.py
+@@ -42,6 +42,7 @@ class Settings(BaseSettings):
+     correlation_id_header: str = "X-Correlation-ID"
+ 
+     max_upload_mb: int = 25
++    api_keys_sha256: str = ""
+     cache_ttl_segundos: int = 3600
+     semantic_cache_umbral: float = 0.97
+     semantic_cache_max_entradas: int = 200
+diff --git a/services/api-fastapi/main.py b/services/api-fastapi/main.py
+index f69eea6..625394d 100644
+--- a/services/api-fastapi/main.py
++++ b/services/api-fastapi/main.py
+@@ -2,7 +2,7 @@ import asyncio
+ import logging
+ from contextlib import asynccontextmanager
+ 
+-from fastapi import FastAPI
++from fastapi import Depends, FastAPI
+ from fastapi.responses import JSONResponse, Response
+ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+ from sqlalchemy import text
+@@ -12,6 +12,7 @@ from config import get_settings
+ from database import crear_engine, crear_redis, crear_sessionmaker
+ from middleware import configurar_logging, registrar_middlewares
+ from routers import router_documentos, router_finops, router_rag
++from seguridad import exigir_api_key
+ 
+ settings = get_settings()
+ configurar_logging(settings.log_level)
+@@ -56,9 +57,9 @@ async def lifespan(app: FastAPI):
+ app = FastAPI(title="cloud-native-rag-finops-platform", version="0.2.0", lifespan=lifespan)
+ registrar_middlewares(app)
+ _configurar_otel(app)
+-app.include_router(router_documentos)
+-app.include_router(router_rag)
+-app.include_router(router_finops)
++app.include_router(router_documentos, dependencies=[Depends(exigir_api_key)])
++app.include_router(router_rag, dependencies=[Depends(exigir_api_key)])
++app.include_router(router_finops, dependencies=[Depends(exigir_api_key)])
+ 
+ 
+ async def _chequear(coro) -> str:
+diff --git a/services/api-fastapi/seguridad.py b/services/api-fastapi/seguridad.py
+new file mode 100644
+index 0000000..2cab791
+--- /dev/null
++++ b/services/api-fastapi/seguridad.py
+@@ -0,0 +1,38 @@
++import hashlib
++import hmac
++import logging
++
++from fastapi import Request
++
++from config import get_settings
++from middleware import ProblemaHTTP
++
++logger = logging.getLogger("api.seguridad")
++
++CABECERA_API_KEY = "X-API-Key"
++
++
++def hashes_configurados() -> list[str]:
++    crudo = get_settings().api_keys_sha256
++    return [h.strip().lower() for h in crudo.split(",") if h.strip()]
++
++
++def autenticacion_activa() -> bool:
++    return bool(hashes_configurados())
++
++
++async def exigir_api_key(request: Request) -> None:
++    hashes = hashes_configurados()
++    if not hashes:
++        return
++    entregada = request.headers.get(CABECERA_API_KEY, "")
++    digest = hashlib.sha256(entregada.encode("utf-8")).hexdigest()
++    valida = False
++    for esperado in hashes:
++        if hmac.compare_digest(digest, esperado):
++            valida = True
++    if not valida:
++        logger.warning("Acceso denegado: API key ausente o inválida", extra={"extra_data": {
++            "ruta": request.url.path, "cabecera_presente": bool(entregada)}})
++        raise ProblemaHTTP(401, "No autenticado", "Se requiere una API key válida en la cabecera X-API-Key.",
++                           headers={"WWW-Authenticate": "ApiKey"})
+-- 
+2.55.0.windows.2
+
