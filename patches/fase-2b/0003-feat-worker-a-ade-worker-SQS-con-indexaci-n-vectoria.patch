@@ -1,0 +1,476 @@
+From 7896b4ebd462f8f26829431aeb50643affede201 Mon Sep 17 00:00:00 2001
+From: CrysDevv <cryssdev@gmail.com>
+Date: Sun, 15 Nov 2026 14:58:10 -0300
+Subject: [PATCH 3/5] =?UTF-8?q?feat(worker):=20a=C3=B1ade=20worker=20SQS?=
+ =?UTF-8?q?=20con=20indexaci=C3=B3n=20vectorial,=20reintentos,=20conciliac?=
+ =?UTF-8?q?i=C3=B3n=20de=20DLQ=20y=20m=C3=A9tricas=20FinOps?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ services/api-fastapi/aws_worker.py |  70 +++++++++++
+ services/api-fastapi/ingesta.py    | 176 ++++++++++++++++++++++++++
+ services/api-fastapi/worker.py     | 190 +++++++++++++++++++++++++++++
+ 3 files changed, 436 insertions(+)
+ create mode 100644 services/api-fastapi/aws_worker.py
+ create mode 100644 services/api-fastapi/ingesta.py
+ create mode 100644 services/api-fastapi/worker.py
+
+diff --git a/services/api-fastapi/aws_worker.py b/services/api-fastapi/aws_worker.py
+new file mode 100644
+index 0000000..be4985b
+--- /dev/null
++++ b/services/api-fastapi/aws_worker.py
+@@ -0,0 +1,70 @@
++import asyncio
++import logging
++from typing import Any
++
++import boto3
++from botocore.config import Config
++from botocore.exceptions import ClientError
++
++from aws_clients import AwsGateway
++from config import Settings
++from extractores import ErrorPermanente
++
++logger = logging.getLogger("worker.aws")
++
++
++class AwsWorkerGateway(AwsGateway):
++    def __init__(self, settings: Settings, espera_sondeo: int = 20):
++        super().__init__(settings)
++        comunes = dict(
++            region_name=settings.aws_region,
++            endpoint_url=settings.aws_endpoint_url or None,
++            aws_access_key_id=settings.aws_access_key_id,
++            aws_secret_access_key=settings.aws_secret_access_key,
++        )
++        reintentos = {"max_attempts": 3, "mode": "standard"}
++        self._sqs = boto3.client(
++            "sqs", config=Config(connect_timeout=3, read_timeout=espera_sondeo + 15, retries=reintentos), **comunes)
++        self._s3 = boto3.client(
++            "s3", config=Config(connect_timeout=3, read_timeout=60, retries=reintentos), **comunes)
++
++    async def descargar_s3(self, bucket: str, key: str, limite_bytes: int) -> bytes:
++        def _obtener() -> bytes:
++            try:
++                resp = self._s3.get_object(Bucket=bucket, Key=key)
++            except ClientError as exc:
++                codigo = exc.response.get("Error", {}).get("Code", "")
++                if codigo in {"NoSuchKey", "NoSuchBucket", "404"}:
++                    raise ErrorPermanente(f"El objeto s3://{bucket}/{key} no existe.") from exc
++                raise
++            if int(resp.get("ContentLength", 0)) > limite_bytes:
++                raise ErrorPermanente("El objeto excede el tamaño máximo permitido para procesamiento.")
++            datos = resp["Body"].read(limite_bytes + 1)
++            if len(datos) > limite_bytes:
++                raise ErrorPermanente("El objeto excede el tamaño máximo permitido para procesamiento.")
++            return datos
++
++        return await asyncio.to_thread(_obtener)
++
++    async def recibir(self, nombre_cola: str, maximo: int, espera: int, visibilidad: int) -> list[dict[str, Any]]:
++        def _recibir() -> list[dict[str, Any]]:
++            resp = self._sqs.receive_message(
++                QueueUrl=self._url_cola(nombre_cola),
++                MaxNumberOfMessages=max(1, min(maximo, 10)),
++                WaitTimeSeconds=max(0, min(espera, 20)),
++                VisibilityTimeout=visibilidad,
++                MessageAttributeNames=["All"],
++                AttributeNames=["ApproximateReceiveCount"],
++            )
++            return resp.get("Messages", [])
++
++        return await asyncio.to_thread(_recibir)
++
++    async def eliminar(self, nombre_cola: str, receipt_handle: str) -> None:
++        await asyncio.to_thread(
++            self._sqs.delete_message, QueueUrl=self._url_cola(nombre_cola), ReceiptHandle=receipt_handle)
++
++    async def cambiar_visibilidad(self, nombre_cola: str, receipt_handle: str, segundos: int) -> None:
++        await asyncio.to_thread(
++            self._sqs.change_message_visibility, QueueUrl=self._url_cola(nombre_cola),
++            ReceiptHandle=receipt_handle, VisibilityTimeout=max(0, min(segundos, 43200)))
+diff --git a/services/api-fastapi/ingesta.py b/services/api-fastapi/ingesta.py
+new file mode 100644
+index 0000000..ad8627a
+--- /dev/null
++++ b/services/api-fastapi/ingesta.py
+@@ -0,0 +1,176 @@
++import asyncio
++import hashlib
++import json
++import logging
++import re
++import time
++import uuid
++from collections import Counter as Conteo
++from typing import Any
++
++from prometheus_client import Counter, Histogram
++from sqlalchemy import text
++from sqlalchemy.ext.asyncio import async_sessionmaker
++
++from aws_worker import AwsWorkerGateway
++from chunker import dividir_texto
++from config import Settings
++from extractores import ErrorExtraccion, ErrorPermanente, Extraccion, extraer_paginas
++from pii_guardrail import anonimizar
++from rag_engine import generar_embedding, literal_vector, registrar_metrica
++
++logger = logging.getLogger("worker.ingesta")
++
++INGESTA_DOCS = Counter("ingesta_documentos_total", "Documentos procesados por el worker", ["resultado"])
++INGESTA_FRAGMENTOS = Counter("ingesta_fragmentos_total", "Fragmentos vectoriales insertados")
++INGESTA_DURACION = Histogram("ingesta_duracion_seconds", "Duración de la ingesta por documento")
++
++RESULTADO_INDEXADO = "INDEXADO"
++RESULTADO_OMITIDO = "OMITIDO"
++RESULTADO_HUERFANO = "HUERFANO"
++RESULTADO_OCUPADO = "OCUPADO"
++
++LIMITE_S3_GET_MES = 20000.0
++LOTE_INSERCION = 200
++_RE_TOKEN_PII = re.compile(r"\[(?:RUT|EMAIL|TELEFONO|TARJETA|CUENTA)_ANONIMIZAD[OA]\]")
++
++
++class ErrorIntegridad(ErrorPermanente):
++    pass
++
++
++_SQL_RECLAMAR = text("""
++UPDATE documentos
++SET estado = 'PROCESANDO', intentos = COALESCE(intentos, 0) + 1, mensaje_error = NULL, actualizado_en = now()
++WHERE id = CAST(:id AS uuid)
++  AND (estado IN ('PENDIENTE', 'ERROR', 'DLQ')
++       OR (estado = 'PROCESANDO'
++           AND actualizado_en < now() - make_interval(secs => CAST(:stale AS double precision))))
++RETURNING id, nombre_archivo, tipo_contenido, s3_bucket, s3_key, sha256, intentos
++""")
++
++_SQL_ESTADO = text("SELECT estado FROM documentos WHERE id = CAST(:id AS uuid)")
++
++_SQL_BORRAR_FRAGMENTOS = text("DELETE FROM fragmentos_vectoriales WHERE documento_id = CAST(:id AS uuid)")
++
++_SQL_INSERTAR_FRAGMENTO = text("""
++INSERT INTO fragmentos_vectoriales (id, documento_id, pagina, indice_fragmento, contenido_anonimizado,
++                                    embedding, num_tokens, pii_reemplazos, metadatos, creado_en)
++VALUES (CAST(:id AS uuid), CAST(:doc AS uuid), :pagina, :indice, :contenido,
++        CAST(CAST(:emb AS text) AS vector), :tokens, :pii, CAST(:meta AS jsonb), now())
++""")
++
++_SQL_INDEXAR = text("""
++UPDATE documentos
++SET estado = 'INDEXADO', num_paginas = :paginas, pii_detectada = CAST(:pii AS jsonb),
++    mensaje_error = NULL, actualizado_en = now()
++WHERE id = CAST(:id AS uuid) AND estado = 'PROCESANDO'
++""")
++
++_SQL_FALLO = text("""
++UPDATE documentos SET estado = :estado, mensaje_error = :mensaje, actualizado_en = now()
++WHERE id = CAST(:id AS uuid) AND estado <> 'INDEXADO'
++""")
++
++_SQL_CONCILIAR_DLQ = text("""
++UPDATE documentos
++SET estado = 'DLQ', mensaje_error = COALESCE(mensaje_error, 'Mensaje movido a la DLQ de SQS'),
++    actualizado_en = now()
++WHERE id = CAST(:id AS uuid) AND estado IN ('PENDIENTE', 'ERROR')
++""")
++
++
++def preparar_fragmentos(extraccion: Extraccion, settings: Settings) -> tuple[list[dict[str, Any]], dict[str, Any]]:
++    fragmentos: list[dict[str, Any]] = []
++    por_tipo: Conteo = Conteo()
++    total_pii = 0
++    indice = 0
++    for numero, contenido in extraccion.paginas:
++        anon = anonimizar(contenido, settings.pii_anonymize_enabled)
++        total_pii += anon.total
++        por_tipo.update(anon.por_tipo)
++        for trozo in dividir_texto(anon.texto, settings.chunk_size, settings.chunk_overlap):
++            vector = generar_embedding(trozo, settings.embedding_dimensions)
++            fragmentos.append({
++                "id": str(uuid.uuid4()),
++                "pagina": numero,
++                "indice": indice,
++                "contenido": trozo,
++                "emb": literal_vector(vector),
++                "tokens": len(trozo.split()),
++                "pii": len(_RE_TOKEN_PII.findall(trozo)),
++                "meta": json.dumps({"extractor": extraccion.extractor, "caracteres": len(trozo)}),
++            })
++            indice += 1
++    if not fragmentos:
++        raise ErrorExtraccion("No se generaron fragmentos a partir del documento.")
++    resumen = {"detectada": total_pii > 0, "total": total_pii, "por_tipo": dict(por_tipo)}
++    return fragmentos, resumen
++
++
++async def procesar_documento(sessionmaker: async_sessionmaker, gateway: AwsWorkerGateway, settings: Settings,
++                             documento_id: str, correlation_id: str, stale_segundos: float) -> str:
++    inicio = time.perf_counter()
++    async with sessionmaker() as session:
++        fila = (await session.execute(_SQL_RECLAMAR, {"id": documento_id, "stale": float(stale_segundos)})
++                ).mappings().first()
++        doc = dict(fila) if fila else None
++        await session.commit()
++        if doc is None:
++            estado = (await session.execute(_SQL_ESTADO, {"id": documento_id})).scalar_one_or_none()
++            await session.rollback()
++            if estado is None:
++                return RESULTADO_HUERFANO
++            return RESULTADO_OCUPADO if estado == "PROCESANDO" else RESULTADO_OMITIDO
++
++    limite_bytes = settings.max_upload_mb * 1024 * 1024
++    datos = await gateway.descargar_s3(doc["s3_bucket"], doc["s3_key"], limite_bytes)
++    sha_calculado = await asyncio.to_thread(lambda: hashlib.sha256(datos).hexdigest())
++    if sha_calculado != str(doc["sha256"]).strip():
++        raise ErrorIntegridad("El SHA-256 del objeto en S3 no coincide con el registrado en la base de datos.")
++
++    extraccion = await asyncio.to_thread(extraer_paginas, datos, doc["nombre_archivo"])
++    fragmentos, resumen_pii = await asyncio.to_thread(preparar_fragmentos, extraccion, settings)
++
++    async with sessionmaker() as session:
++        await session.execute(_SQL_BORRAR_FRAGMENTOS, {"id": documento_id})
++        for i in range(0, len(fragmentos), LOTE_INSERCION):
++            lote = [{**f, "doc": documento_id} for f in fragmentos[i:i + LOTE_INSERCION]]
++            await session.execute(_SQL_INSERTAR_FRAGMENTO, lote)
++        resultado = await session.execute(_SQL_INDEXAR, {
++            "paginas": extraccion.num_paginas, "pii": json.dumps(resumen_pii), "id": documento_id})
++        if resultado.rowcount == 0:
++            raise RuntimeError("El estado del documento cambió durante el procesamiento.")
++        duracion_ms = int((time.perf_counter() - inicio) * 1000)
++        await registrar_metrica(session, "worker", "documentos_procesados", 1, "documentos", correlation_id,
++                                metadatos={"fragmentos": len(fragmentos), "duracion_ms": duracion_ms})
++        await registrar_metrica(session, "embeddings", "embeddings_generados", len(fragmentos), "vectores",
++                                correlation_id, metadatos={"proveedor": settings.embedding_provider})
++        await registrar_metrica(session, "s3", "get_requests", 1, "requests", correlation_id,
++                                limite=LIMITE_S3_GET_MES, metadatos={"bytes": len(datos)})
++        await registrar_metrica(session, "postgres", "fragmentos_insertados", len(fragmentos), "filas",
++                                correlation_id)
++        await session.commit()
++
++    INGESTA_DOCS.labels("indexado").inc()
++    INGESTA_FRAGMENTOS.inc(len(fragmentos))
++    INGESTA_DURACION.observe(time.perf_counter() - inicio)
++    logger.info("documento_indexado", extra={"extra_data": {
++        "documento_id": documento_id, "fragmentos": len(fragmentos), "paginas": extraccion.num_paginas,
++        "pii_total": resumen_pii["total"], "duracion_ms": duracion_ms, "intentos": doc["intentos"]}})
++    return RESULTADO_INDEXADO
++
++
++async def marcar_fallo(sessionmaker: async_sessionmaker, documento_id: str, estado: str, mensaje: str,
++                       correlation_id: str) -> None:
++    async with sessionmaker() as session:
++        await session.execute(_SQL_FALLO, {"estado": estado, "mensaje": mensaje[:500], "id": documento_id})
++        await registrar_metrica(session, "worker", "documentos_fallidos", 1, "documentos", correlation_id,
++                                metadatos={"estado": estado})
++        await session.commit()
++
++
++async def conciliar_dlq(sessionmaker: async_sessionmaker, documento_id: str) -> None:
++    async with sessionmaker() as session:
++        await session.execute(_SQL_CONCILIAR_DLQ, {"id": documento_id})
++        await session.commit()
+diff --git a/services/api-fastapi/worker.py b/services/api-fastapi/worker.py
+new file mode 100644
+index 0000000..5239a3d
+--- /dev/null
++++ b/services/api-fastapi/worker.py
+@@ -0,0 +1,190 @@
++import asyncio
++import json
++import logging
++import signal
++import time
++import uuid
++from pathlib import Path
++from typing import Any
++
++from prometheus_client import start_http_server
++
++import ingesta
++from aws_worker import AwsWorkerGateway
++from config import Settings
++from database import crear_engine, crear_sessionmaker
++from extractores import ErrorPermanente
++from middleware import configurar_logging, correlation_id_ctx
++
++logger = logging.getLogger("worker")
++
++
++class WorkerSettings(Settings):
++    worker_concurrency: int = 2
++    worker_poll_wait_seconds: int = 20
++    worker_visibility_timeout: int = 300
++    worker_processing_timeout: int = 240
++    worker_metrics_port: int = 9100
++    worker_heartbeat_file: str = "/tmp/worker_heartbeat"
++    worker_dlq_reconcile_seconds: int = 60
++
++
++async def _dormir(parar: asyncio.Event, segundos: float) -> None:
++    try:
++        await asyncio.wait_for(parar.wait(), timeout=segundos)
++    except asyncio.TimeoutError:
++        pass
++
++
++def _parsear(settings: Settings, mensaje: dict[str, Any]) -> tuple[str | None, str]:
++    atributo = mensaje.get("MessageAttributes", {}).get(settings.correlation_id_header, {})
++    cid = str(atributo.get("StringValue", "")).strip()
++    try:
++        cuerpo = json.loads(mensaje.get("Body", "{}"))
++    except ValueError:
++        cuerpo = {}
++    if not isinstance(cuerpo, dict):
++        cuerpo = {}
++    cid = (cid or str(cuerpo.get("correlation_id", "")).strip() or str(uuid.uuid4()))[:128]
++    try:
++        documento_id = str(uuid.UUID(str(cuerpo.get("documento_id", ""))))
++    except ValueError:
++        documento_id = None
++    return documento_id, cid
++
++
++async def _latido(settings: WorkerSettings, parar: asyncio.Event) -> None:
++    ruta = Path(settings.worker_heartbeat_file)
++    while not parar.is_set():
++        try:
++            ruta.write_text(str(int(time.time())))
++        except OSError:
++            logger.warning("No fue posible escribir el archivo de latido")
++        await _dormir(parar, 15)
++
++
++async def _tratar_mensaje(settings: WorkerSettings, sessionmaker, gateway: AwsWorkerGateway,
++                          mensaje: dict[str, Any]) -> None:
++    cola = settings.sqs_queue_ingesta
++    handle = mensaje["ReceiptHandle"]
++    recuento = int(mensaje.get("Attributes", {}).get("ApproximateReceiveCount", "1"))
++    documento_id, cid = _parsear(settings, mensaje)
++    token = correlation_id_ctx.set(cid)
++    limite = max(30, min(settings.worker_processing_timeout, settings.worker_visibility_timeout - 30))
++    try:
++        if documento_id is None:
++            logger.error("Mensaje de ingesta inválido; se descarta")
++            ingesta.INGESTA_DOCS.labels("mensaje_invalido").inc()
++            await gateway.eliminar(cola, handle)
++            return
++        try:
++            resultado = await asyncio.wait_for(
++                ingesta.procesar_documento(sessionmaker, gateway, settings, documento_id, cid,
++                                           settings.worker_visibility_timeout),
++                timeout=limite)
++        except ErrorPermanente as exc:
++            logger.error("Fallo permanente en la ingesta", extra={"extra_data": {
++                "documento_id": documento_id, "error": str(exc)}})
++            ingesta.INGESTA_DOCS.labels("error_permanente").inc()
++            await ingesta.marcar_fallo(sessionmaker, documento_id, "ERROR", str(exc), cid)
++            await gateway.eliminar(cola, handle)
++            return
++        except Exception as exc:
++            ultimo = recuento >= settings.sqs_max_receive_count
++            logger.exception("Fallo transitorio en la ingesta", extra={"extra_data": {
++                "documento_id": documento_id, "intento": recuento, "ultimo_intento": ultimo}})
++            ingesta.INGESTA_DOCS.labels("error_transitorio").inc()
++            try:
++                await ingesta.marcar_fallo(sessionmaker, documento_id, "DLQ" if ultimo else "ERROR",
++                                           f"{type(exc).__name__}: {exc}", cid)
++                espera = 5 if ultimo else min(30 * 2 ** (recuento - 1), 300)
++                await gateway.cambiar_visibilidad(cola, handle, espera)
++            except Exception:
++                logger.exception("No fue posible registrar el fallo del documento")
++            return
++
++        if resultado == ingesta.RESULTADO_OCUPADO:
++            logger.info("Documento en procesamiento por otro worker; se reintentará", extra={
++                "extra_data": {"documento_id": documento_id}})
++            return
++        ingesta.INGESTA_DOCS.labels(resultado.lower()).inc()
++        await gateway.eliminar(cola, handle)
++    except Exception:
++        logger.exception("Error inesperado al tratar el mensaje")
++    finally:
++        correlation_id_ctx.reset(token)
++
++
++async def _bucle_ingesta(settings: WorkerSettings, sessionmaker, gateway: AwsWorkerGateway,
++                         parar: asyncio.Event) -> None:
++    espera_error = 1.0
++    while not parar.is_set():
++        try:
++            mensajes = await gateway.recibir(settings.sqs_queue_ingesta, settings.worker_concurrency,
++                                             settings.worker_poll_wait_seconds, settings.worker_visibility_timeout)
++            espera_error = 1.0
++        except Exception as exc:
++            logger.warning("No fue posible consultar SQS: %s", type(exc).__name__)
++            await _dormir(parar, espera_error)
++            espera_error = min(espera_error * 2, 30.0)
++            continue
++        if mensajes:
++            await asyncio.gather(*(_tratar_mensaje(settings, sessionmaker, gateway, m) for m in mensajes))
++
++
++async def _bucle_dlq(settings: WorkerSettings, sessionmaker, gateway: AwsWorkerGateway,
++                     parar: asyncio.Event) -> None:
++    while not parar.is_set():
++        await _dormir(parar, settings.worker_dlq_reconcile_seconds)
++        if parar.is_set():
++            break
++        try:
++            mensajes = await gateway.recibir(settings.sqs_queue_dlq, 10, 1, 30)
++            for m in mensajes:
++                documento_id, cid = _parsear(settings, m)
++                if documento_id:
++                    token = correlation_id_ctx.set(cid)
++                    try:
++                        await ingesta.conciliar_dlq(sessionmaker, documento_id)
++                    finally:
++                        correlation_id_ctx.reset(token)
++        except Exception as exc:
++            logger.warning("No fue posible conciliar la DLQ: %s", type(exc).__name__)
++
++
++async def ejecutar() -> None:
++    settings = WorkerSettings()
++    configurar_logging(settings.log_level)
++    engine = crear_engine(settings)
++    sessionmaker = crear_sessionmaker(engine)
++    gateway = AwsWorkerGateway(settings, settings.worker_poll_wait_seconds)
++    parar = asyncio.Event()
++
++    bucle = asyncio.get_running_loop()
++    for senal in (signal.SIGINT, signal.SIGTERM):
++        try:
++            bucle.add_signal_handler(senal, parar.set)
++        except NotImplementedError:
++            signal.signal(senal, lambda *_: parar.set())
++
++    start_http_server(settings.worker_metrics_port)
++    logger.info("Worker de ingesta iniciado", extra={"extra_data": {
++        "cola": settings.sqs_queue_ingesta, "dlq": settings.sqs_queue_dlq,
++        "concurrencia": settings.worker_concurrency}})
++    try:
++        await asyncio.gather(
++            _latido(settings, parar),
++            _bucle_ingesta(settings, sessionmaker, gateway, parar),
++            _bucle_dlq(settings, sessionmaker, gateway, parar),
++        )
++    finally:
++        await engine.dispose()
++        logger.info("Worker de ingesta detenido")
++
++
++def main() -> None:
++    asyncio.run(ejecutar())
++
++
++if __name__ == "__main__":
++    main()
+-- 
+2.55.0.windows.2
+

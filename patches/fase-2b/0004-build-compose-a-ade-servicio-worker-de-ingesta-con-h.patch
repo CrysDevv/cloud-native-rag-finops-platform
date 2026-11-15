@@ -1,0 +1,43 @@
+From ab1d42e477c76fa76cc6e782b5c7ed9eb01bc3da Mon Sep 17 00:00:00 2001
+From: CrysDevv <cryssdev@gmail.com>
+Date: Sun, 15 Nov 2026 14:58:11 -0300
+Subject: [PATCH 4/5] =?UTF-8?q?build(compose):=20a=C3=B1ade=20servicio=20w?=
+ =?UTF-8?q?orker=20de=20ingesta=20con=20healthcheck=20y=20apagado=20ordena?=
+ =?UTF-8?q?do?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ docker-compose.worker.yml | 19 +++++++++++++++++++
+ 1 file changed, 19 insertions(+)
+ create mode 100644 docker-compose.worker.yml
+
+diff --git a/docker-compose.worker.yml b/docker-compose.worker.yml
+new file mode 100644
+index 0000000..3f60464
+--- /dev/null
++++ b/docker-compose.worker.yml
+@@ -0,0 +1,19 @@
++# Uso: docker compose -f docker-compose.yml -f docker-compose.worker.yml up -d --build worker
++# Requiere Docker Compose >= 2.24 (etiqueta !reset). Hereda imagen, entorno y dependencias del servicio "api".
++services:
++  worker:
++    extends:
++      file: docker-compose.yml
++      service: api
++    container_name: rag-worker-ingesta
++    command: ["python", "-m", "worker"]
++    ports: !reset []
++    expose:
++      - "9100"
++    stop_grace_period: 60s
++    healthcheck:
++      test: ["CMD", "python", "-c", "import os,sys,time; sys.exit(0 if time.time()-os.path.getmtime('/tmp/worker_heartbeat')<90 else 1)"]
++      interval: 30s
++      timeout: 5s
++      retries: 3
++      start_period: 20s
+-- 
+2.55.0.windows.2
+
