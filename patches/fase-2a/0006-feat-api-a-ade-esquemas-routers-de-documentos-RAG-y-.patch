@@ -1,0 +1,443 @@
+From 3a978a8b60ae7b7769c6f35badd4daa845d80af2 Mon Sep 17 00:00:00 2001
+From: CrysDevv <cryssdev@gmail.com>
+Date: Sun, 15 Nov 2026 14:48:00 -0300
+Subject: [PATCH 6/6] =?UTF-8?q?feat(api):=20a=C3=B1ade=20esquemas,=20route?=
+ =?UTF-8?q?rs=20de=20documentos,=20RAG=20y=20FinOps,=20y=20aplicaci=C3=B3n?=
+ =?UTF-8?q?=20FastAPI=20con=20salud=20y=20m=C3=A9tricas?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ services/api-fastapi/main.py    |  88 +++++++++++++
+ services/api-fastapi/routers.py | 224 ++++++++++++++++++++++++++++++++
+ services/api-fastapi/schemas.py |  91 +++++++++++++
+ 3 files changed, 403 insertions(+)
+ create mode 100644 services/api-fastapi/main.py
+ create mode 100644 services/api-fastapi/routers.py
+ create mode 100644 services/api-fastapi/schemas.py
+
+diff --git a/services/api-fastapi/main.py b/services/api-fastapi/main.py
+new file mode 100644
+index 0000000..f69eea6
+--- /dev/null
++++ b/services/api-fastapi/main.py
+@@ -0,0 +1,88 @@
++import asyncio
++import logging
++from contextlib import asynccontextmanager
++
++from fastapi import FastAPI
++from fastapi.responses import JSONResponse, Response
++from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
++from sqlalchemy import text
++
++from aws_clients import AwsGateway
++from config import get_settings
++from database import crear_engine, crear_redis, crear_sessionmaker
++from middleware import configurar_logging, registrar_middlewares
++from routers import router_documentos, router_finops, router_rag
++
++settings = get_settings()
++configurar_logging(settings.log_level)
++logger = logging.getLogger("api")
++
++
++def _configurar_otel(app: FastAPI) -> None:
++    try:
++        from opentelemetry import trace
++        from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
++        from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
++        from opentelemetry.sdk.resources import Resource
++        from opentelemetry.sdk.trace import TracerProvider
++        from opentelemetry.sdk.trace.export import BatchSpanProcessor
++
++        proveedor = TracerProvider(resource=Resource.create({"service.name": settings.otel_service_name,
++                                                             "deployment.environment": settings.app_env}))
++        proveedor.add_span_processor(BatchSpanProcessor(
++            OTLPSpanExporter(endpoint=settings.otel_exporter_otlp_endpoint, insecure=True)))
++        trace.set_tracer_provider(proveedor)
++        FastAPIInstrumentor.instrument_app(app, excluded_urls="health,metrics")
++    except Exception:
++        logger.warning("OpenTelemetry no pudo inicializarse; el servicio continúa sin trazas")
++
++
++@asynccontextmanager
++async def lifespan(app: FastAPI):
++    engine = crear_engine(settings)
++    app.state.engine = engine
++    app.state.sessionmaker = crear_sessionmaker(engine)
++    app.state.redis = crear_redis(settings)
++    app.state.gateway = AwsGateway(settings)
++    logger.info("Servicio iniciado", extra={"extra_data": {"entorno": settings.app_env}})
++    try:
++        yield
++    finally:
++        await app.state.redis.aclose()
++        await engine.dispose()
++        logger.info("Servicio detenido")
++
++
++app = FastAPI(title="cloud-native-rag-finops-platform", version="0.2.0", lifespan=lifespan)
++registrar_middlewares(app)
++_configurar_otel(app)
++app.include_router(router_documentos)
++app.include_router(router_rag)
++app.include_router(router_finops)
++
++
++async def _chequear(coro) -> str:
++    try:
++        await asyncio.wait_for(coro, timeout=3)
++        return "ok"
++    except Exception as exc:
++        return f"error: {type(exc).__name__}"
++
++
++@app.get("/health", tags=["operacion"])
++async def health():
++    async def pg():
++        async with app.state.sessionmaker() as s:
++            await s.execute(text("SELECT 1"))
++
++    postgres, redis, localstack = await asyncio.gather(
++        _chequear(pg()), _chequear(app.state.redis.ping()), _chequear(app.state.gateway.verificar_s3()))
++    componentes = {"postgresql": postgres, "redis": redis, "localstack": localstack}
++    sano = all(v == "ok" for v in componentes.values())
++    return JSONResponse({"status": "ok" if sano else "degradado", "componentes": componentes},
++                        status_code=200 if sano else 503)
++
++
++@app.get("/metrics", tags=["operacion"], include_in_schema=False)
++async def metrics():
++    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+diff --git a/services/api-fastapi/routers.py b/services/api-fastapi/routers.py
+new file mode 100644
+index 0000000..df61e8e
+--- /dev/null
++++ b/services/api-fastapi/routers.py
+@@ -0,0 +1,224 @@
++import hashlib
++import json
++import logging
++import mimetypes
++import os
++import re
++import uuid
++from datetime import datetime, timezone
++from typing import AsyncIterator
++from uuid import UUID
++
++from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
++from sqlalchemy import text
++from sqlalchemy.exc import IntegrityError
++from sqlalchemy.ext.asyncio import AsyncSession
++
++import rag_engine
++from aws_clients import AwsGateway
++from config import Settings, get_settings
++from middleware import ProblemaHTTP
++from schemas import (ConsultaRequest, ConsultaResponse, DocumentoCreado, DocumentoLista, DocumentoOut,
++                     EstadoDocumento, FinopsResumen, FinopsServicio)
++
++logger = logging.getLogger("api.routers")
++
++router_documentos = APIRouter(prefix="/api/v1/documentos", tags=["documentos"])
++router_rag = APIRouter(prefix="/api/v1/rag", tags=["rag"])
++router_finops = APIRouter(prefix="/api/v1/finops", tags=["finops"])
++
++EXTENSIONES_PERMITIDAS = {".pdf", ".txt", ".md", ".docx", ".html"}
++LIMITE_S3_PUT_MES = 2000.0
++LIMITE_SQS_REQ_MES = 1_000_000.0
++
++COLUMNAS_DOC = """d.id, d.nombre_archivo, d.titulo, d.tipo_contenido, d.s3_bucket, d.s3_key, d.sha256,
++    d.tamano_bytes, d.num_paginas, d.estado, d.intentos, d.mensaje_error, d.correlation_id, d.pii_detectada,
++    d.creado_en, d.actualizado_en,
++    (SELECT count(*) FROM fragmentos_vectoriales f WHERE f.documento_id = d.id) AS total_fragmentos"""
++
++
++async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
++    async with request.app.state.sessionmaker() as session:
++        yield session
++
++
++def get_redis(request: Request):
++    return request.app.state.redis
++
++
++def get_gateway(request: Request) -> AwsGateway:
++    return request.app.state.gateway
++
++
++def _cid(request: Request) -> str:
++    return request.state.correlation_id
++
++
++@router_documentos.post("", response_model=DocumentoCreado, status_code=201)
++async def subir_documento(
++    request: Request,
++    archivo: UploadFile = File(...),
++    titulo: str | None = Form(default=None, max_length=300),
++    session: AsyncSession = Depends(get_session),
++    gateway: AwsGateway = Depends(get_gateway),
++    settings: Settings = Depends(get_settings),
++):
++    cid = _cid(request)
++    nombre = os.path.basename(archivo.filename or "").strip()
++    if not nombre:
++        raise ProblemaHTTP(400, "Archivo inválido", "El archivo debe incluir un nombre.")
++    extension = os.path.splitext(nombre)[1].lower()
++    if extension not in EXTENSIONES_PERMITIDAS:
++        raise ProblemaHTTP(415, "Tipo de archivo no soportado",
++                           f"Extensiones permitidas: {', '.join(sorted(EXTENSIONES_PERMITIDAS))}.")
++
++    hasher = hashlib.sha256()
++    buffer = bytearray()
++    limite = settings.max_upload_mb * 1024 * 1024
++    while True:
++        trozo = await archivo.read(1024 * 1024)
++        if not trozo:
++            break
++        if len(buffer) + len(trozo) > limite:
++            raise ProblemaHTTP(413, "Archivo demasiado grande", f"El tamaño máximo es {settings.max_upload_mb} MB.")
++        hasher.update(trozo)
++        buffer.extend(trozo)
++    if not buffer:
++        raise ProblemaHTTP(400, "Archivo vacío", "El archivo no contiene datos.")
++    sha256 = hasher.hexdigest()
++
++    existente = (await session.execute(
++        text("SELECT id, estado FROM documentos WHERE sha256 = :h"), {"h": sha256})).mappings().first()
++    if existente:
++        raise ProblemaHTTP(409, "Documento duplicado", "Ya existe un documento con el mismo SHA-256.",
++                           {"documento_id": str(existente["id"]), "estado": existente["estado"]})
++
++    tipo = archivo.content_type or mimetypes.guess_type(nombre)[0] or "application/octet-stream"
++    seguro = re.sub(r"[^A-Za-z0-9._-]+", "_", nombre)[:150]
++    key = f"documentos/{sha256[:2]}/{sha256}/{seguro}"
++    documento_id = uuid.uuid4()
++    titulo_final = (titulo or os.path.splitext(nombre)[0])[:300]
++
++    try:
++        await gateway.subir_s3(key, bytes(buffer), tipo, {"sha256": sha256, "correlation-id": cid})
++    except Exception as exc:
++        logger.exception("Fallo al subir a S3")
++        raise ProblemaHTTP(502, "Error de almacenamiento", "No fue posible almacenar el archivo en S3.") from exc
++
++    try:
++        await session.execute(text("""
++            INSERT INTO documentos (id, nombre_archivo, titulo, tipo_contenido, s3_bucket, s3_key, sha256,
++                tamano_bytes, num_paginas, estado, intentos, mensaje_error, correlation_id, pii_detectada,
++                creado_en, actualizado_en)
++            VALUES (CAST(:id AS uuid), :nombre, :titulo, :tipo, :bucket, :key, :sha, :tam, NULL, 'PENDIENTE', 0,
++                NULL, :cid, CAST('{}' AS jsonb), now(), now())
++        """), {"id": str(documento_id), "nombre": nombre, "titulo": titulo_final, "tipo": tipo,
++               "bucket": settings.s3_bucket_documentos, "key": key, "sha": sha256, "tam": len(buffer), "cid": cid})
++        await session.commit()
++    except IntegrityError as exc:
++        await session.rollback()
++        raise ProblemaHTTP(409, "Documento duplicado", "El documento ya fue registrado previamente.") from exc
++
++    mensaje = json.dumps({
++        "documento_id": str(documento_id), "s3_bucket": settings.s3_bucket_documentos, "s3_key": key,
++        "sha256": sha256, "nombre_archivo": nombre, "tipo_contenido": tipo, "correlation_id": cid,
++    })
++    try:
++        message_id = await gateway.publicar_ingesta(mensaje, cid)
++    except Exception as exc:
++        logger.exception("Fallo al publicar en SQS")
++        await session.execute(text("""
++            UPDATE documentos SET estado = 'ERROR', mensaje_error = :m, actualizado_en = now()
++            WHERE id = CAST(:id AS uuid)"""), {"m": "No se pudo encolar la ingesta en SQS", "id": str(documento_id)})
++        await session.commit()
++        raise ProblemaHTTP(502, "Error de mensajería", "El documento se almacenó pero no pudo encolarse.",
++                           {"documento_id": str(documento_id)}) from exc
++
++    await rag_engine.registrar_metrica(session, "s3", "put_requests", 1, "requests", cid,
++                                       limite=LIMITE_S3_PUT_MES, metadatos={"bytes": len(buffer)})
++    await rag_engine.registrar_metrica(session, "s3", "bytes_almacenados", len(buffer), "bytes", cid)
++    await rag_engine.registrar_metrica(session, "sqs", "mensajes_publicados", 1, "requests", cid,
++                                       limite=LIMITE_SQS_REQ_MES, metadatos={"cola": settings.sqs_queue_ingesta})
++    await rag_engine.registrar_metrica(session, "postgres", "documentos_registrados", 1, "filas", cid)
++    await session.commit()
++
++    return DocumentoCreado(documento_id=documento_id, estado="PENDIENTE", sha256=sha256,
++                           s3_bucket=settings.s3_bucket_documentos, s3_key=key,
++                           sqs_message_id=message_id, correlation_id=cid)
++
++
++@router_documentos.get("", response_model=DocumentoLista)
++async def listar_documentos(
++    estado: EstadoDocumento | None = None,
++    limit: int = Query(default=20, ge=1, le=100),
++    offset: int = Query(default=0, ge=0),
++    session: AsyncSession = Depends(get_session),
++):
++    total = (await session.execute(
++        text("SELECT count(*) FROM documentos d WHERE (CAST(:e AS text) IS NULL OR d.estado = CAST(:e AS text))"),
++        {"e": estado})).scalar_one()
++    filas = (await session.execute(text(f"""
++        SELECT {COLUMNAS_DOC} FROM documentos d
++        WHERE (CAST(:e AS text) IS NULL OR d.estado = CAST(:e AS text))
++        ORDER BY d.creado_en DESC LIMIT :limit OFFSET :offset
++    """), {"e": estado, "limit": limit, "offset": offset})).mappings().all()
++    return DocumentoLista(total=total, limit=limit, offset=offset,
++                          items=[DocumentoOut.model_validate(dict(f)) for f in filas])
++
++
++@router_documentos.get("/{documento_id}", response_model=DocumentoOut)
++async def detalle_documento(documento_id: UUID, session: AsyncSession = Depends(get_session)):
++    fila = (await session.execute(
++        text(f"SELECT {COLUMNAS_DOC} FROM documentos d WHERE d.id = CAST(:id AS uuid)"),
++        {"id": str(documento_id)})).mappings().first()
++    if not fila:
++        raise ProblemaHTTP(404, "Documento no encontrado", f"No existe el documento {documento_id}.")
++    return DocumentoOut.model_validate(dict(fila))
++
++
++@router_rag.post("/consultar", response_model=ConsultaResponse)
++async def consultar_rag(
++    cuerpo: ConsultaRequest,
++    request: Request,
++    session: AsyncSession = Depends(get_session),
++    redis=Depends(get_redis),
++    settings: Settings = Depends(get_settings),
++):
++    resultado = await rag_engine.consultar(session, redis, settings, cuerpo.pregunta, cuerpo.top_k, _cid(request))
++    return ConsultaResponse.model_validate(resultado)
++
++
++@router_finops.get("/resumen", response_model=FinopsResumen)
++async def resumen_finops(
++    dias: int = Query(default=30, ge=1, le=365),
++    session: AsyncSession = Depends(get_session),
++    gateway: AwsGateway = Depends(get_gateway),
++    settings: Settings = Depends(get_settings),
++):
++    filas = (await session.execute(text("""
++        SELECT periodo, servicio, consumo_total, costo_total_usd, limite_capa_gratuita
++        FROM vw_finops_resumen_diario
++        WHERE periodo >= CURRENT_DATE - CAST(:dias AS integer)
++        ORDER BY periodo DESC, servicio
++    """), {"dias": dias})).mappings().all()
++
++    servicios: list[FinopsServicio] = []
++    costo_total = 0.0
++    for f in filas:
++        consumo = float(f["consumo_total"] or 0)
++        costo = float(f["costo_total_usd"] or 0)
++        limite = float(f["limite_capa_gratuita"]) if f["limite_capa_gratuita"] is not None else None
++        pct = round(consumo / limite * 100, 2) if limite else None
++        costo_total += costo
++        servicios.append(FinopsServicio(periodo=f["periodo"], servicio=f["servicio"], consumo_total=consumo,
++                                        costo_total_usd=costo, limite_capa_gratuita=limite,
++                                        uso_capa_gratuita_pct=pct, alerta=bool(pct is not None and pct >= 80)))
++
++    ingesta = await gateway.estado_cola(settings.sqs_queue_ingesta)
++    dlq = await gateway.estado_cola(settings.sqs_queue_dlq)
++    estado = "DENTRO_DEL_PRESUPUESTO" if costo_total <= settings.finops_budget_usd else "PRESUPUESTO_EXCEDIDO"
++    return FinopsResumen(generado_en=datetime.now(timezone.utc), dias=dias,
++                         presupuesto_usd=settings.finops_budget_usd, costo_total_usd=round(costo_total, 6),
++                         estado_presupuesto=estado, servicios=servicios,
++                         colas={"ingesta": ingesta, "dlq": dlq},
++                         sqs_max_receive_count=settings.sqs_max_receive_count)
+diff --git a/services/api-fastapi/schemas.py b/services/api-fastapi/schemas.py
+new file mode 100644
+index 0000000..78aa76a
+--- /dev/null
++++ b/services/api-fastapi/schemas.py
+@@ -0,0 +1,91 @@
++from datetime import date, datetime
++from typing import Any, Literal
++from uuid import UUID
++
++from pydantic import BaseModel, Field
++
++EstadoDocumento = Literal["PENDIENTE", "PROCESANDO", "INDEXADO", "ERROR", "DLQ"]
++
++
++class DocumentoOut(BaseModel):
++    id: UUID
++    nombre_archivo: str
++    titulo: str | None = None
++    tipo_contenido: str | None = None
++    s3_bucket: str
++    s3_key: str
++    sha256: str
++    tamano_bytes: int | None = None
++    num_paginas: int | None = None
++    estado: EstadoDocumento
++    intentos: int | None = None
++    mensaje_error: str | None = None
++    correlation_id: str | None = None
++    pii_detectada: dict[str, Any] | None = None
++    creado_en: datetime
++    actualizado_en: datetime
++    total_fragmentos: int | None = None
++
++
++class DocumentoLista(BaseModel):
++    total: int
++    limit: int
++    offset: int
++    items: list[DocumentoOut]
++
++
++class DocumentoCreado(BaseModel):
++    documento_id: UUID
++    estado: EstadoDocumento
++    sha256: str
++    s3_bucket: str
++    s3_key: str
++    sqs_message_id: str
++    correlation_id: str
++
++
++class ConsultaRequest(BaseModel):
++    pregunta: str = Field(min_length=3, max_length=2000)
++    top_k: int | None = Field(default=None, ge=1, le=20)
++
++
++class Cita(BaseModel):
++    documento_id: UUID
++    nombre_archivo: str
++    pagina: int
++    indice_fragmento: int
++    score: float
++    extracto: str
++
++
++class ConsultaResponse(BaseModel):
++    respuesta: str
++    citas: list[Cita]
++    fragmentos_recuperados: int
++    cache_hit: bool
++    pii_detectada: bool
++    pii_resumen: dict[str, Any]
++    pregunta_anonimizada: str
++    latencia_ms: int
++    correlation_id: str
++
++
++class FinopsServicio(BaseModel):
++    periodo: date
++    servicio: str
++    consumo_total: float
++    costo_total_usd: float
++    limite_capa_gratuita: float | None = None
++    uso_capa_gratuita_pct: float | None = None
++    alerta: bool = False
++
++
++class FinopsResumen(BaseModel):
++    generado_en: datetime
++    dias: int
++    presupuesto_usd: float
++    costo_total_usd: float
++    estado_presupuesto: Literal["DENTRO_DEL_PRESUPUESTO", "PRESUPUESTO_EXCEDIDO"]
++    servicios: list[FinopsServicio]
++    colas: dict[str, dict[str, Any]]
++    sqs_max_receive_count: int
+-- 
+2.55.0.windows.2
+
