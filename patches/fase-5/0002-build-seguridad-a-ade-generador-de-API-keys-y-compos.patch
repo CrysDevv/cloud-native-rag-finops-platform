@@ -1,0 +1,46 @@
+From 1c43cdf1a5aef59b11beec61a71b2efe07219ff8 Mon Sep 17 00:00:00 2001
+From: CrysDevv <cryssdev@gmail.com>
+Date: Sun, 15 Nov 2026 15:42:20 -0300
+Subject: [PATCH 2/6] =?UTF-8?q?build(seguridad):=20a=C3=B1ade=20generador?=
+ =?UTF-8?q?=20de=20API=20keys=20y=20composici=C3=B3n=20con=20autenticaci?=
+ =?UTF-8?q?=C3=B3n=20obligatoria?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ docker-compose.auth.yml    | 6 ++++++
+ scripts/generar_api_key.py | 8 ++++++++
+ 2 files changed, 14 insertions(+)
+ create mode 100644 docker-compose.auth.yml
+ create mode 100644 scripts/generar_api_key.py
+
+diff --git a/docker-compose.auth.yml b/docker-compose.auth.yml
+new file mode 100644
+index 0000000..e8e3ae9
+--- /dev/null
++++ b/docker-compose.auth.yml
+@@ -0,0 +1,6 @@
++# Uso: docker compose -f docker-compose.yml -f docker-compose.worker.yml -f docker-compose.monitoring.yml -f docker-compose.auth.yml up -d
++# Exige definir API_KEYS_SHA256 en .env (ver scripts/generar_api_key.py).
++services:
++  api:
++    environment:
++      API_KEYS_SHA256: ${API_KEYS_SHA256:?Definir API_KEYS_SHA256 en .env}
+diff --git a/scripts/generar_api_key.py b/scripts/generar_api_key.py
+new file mode 100644
+index 0000000..7ef111f
+--- /dev/null
++++ b/scripts/generar_api_key.py
+@@ -0,0 +1,8 @@
++#!/usr/bin/env python3
++"""Genera una API key aleatoria y el hash SHA-256 que se debe registrar en API_KEYS_SHA256."""
++import hashlib
++import secrets
++
++clave = secrets.token_urlsafe(32)
++print(f"API_KEY (entregar al cliente, no se almacena): {clave}")
++print(f"API_KEYS_SHA256 (agregar a .env; varias claves separadas por coma): {hashlib.sha256(clave.encode()).hexdigest()}")
+-- 
+2.55.0.windows.2
+
