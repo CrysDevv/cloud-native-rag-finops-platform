@@ -1,0 +1,114 @@
+From 5c1cb93358bc769c565953b893db37ca463f2a79 Mon Sep 17 00:00:00 2001
+From: CrysDevv <cryssdev@gmail.com>
+Date: Sun, 15 Nov 2026 15:09:14 -0300
+Subject: [PATCH 3/4] =?UTF-8?q?feat(monitoreo):=20a=C3=B1ade=20configuraci?=
+ =?UTF-8?q?=C3=B3n=20de=20Prometheus=20y=20reglas=20de=20alerta=20para=20A?=
+ =?UTF-8?q?PI=20y=20worker?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ monitoring/prometheus/alert-rules.yml | 61 +++++++++++++++++++++++++++
+ monitoring/prometheus/prometheus.yml  | 21 +++++++++
+ 2 files changed, 82 insertions(+)
+ create mode 100644 monitoring/prometheus/alert-rules.yml
+ create mode 100644 monitoring/prometheus/prometheus.yml
+
+diff --git a/monitoring/prometheus/alert-rules.yml b/monitoring/prometheus/alert-rules.yml
+new file mode 100644
+index 0000000..1cb748e
+--- /dev/null
++++ b/monitoring/prometheus/alert-rules.yml
+@@ -0,0 +1,61 @@
++groups:
++  - name: rag-api
++    rules:
++      - alert: ApiCaida
++        expr: up{job="api"} == 0
++        for: 1m
++        labels:
++          severity: critical
++        annotations:
++          summary: "La API FastAPI no responde al scraping de Prometheus"
++
++      - alert: ApiTasaErrores5xxAlta
++        expr: |
++          sum(rate(http_requests_total{estado=~"5.."}[5m]))
++            / clamp_min(sum(rate(http_requests_total[5m])), 0.001) > 0.05
++        for: 5m
++        labels:
++          severity: warning
++        annotations:
++          summary: "Más del 5 % de las solicitudes terminan en error 5xx"
++
++      - alert: ApiLimiteDeTasaActivo
++        expr: sum(rate(http_rate_limited_total[5m])) > 1
++        for: 5m
++        labels:
++          severity: warning
++        annotations:
++          summary: "El rate limiting por Redis está rechazando solicitudes de forma sostenida"
++
++      - alert: ConsultasRagLatenciaP95Alta
++        expr: histogram_quantile(0.95, sum(rate(rag_consulta_duracion_seconds_bucket[5m])) by (le)) > 2
++        for: 10m
++        labels:
++          severity: warning
++        annotations:
++          summary: "La latencia p95 de consultas RAG supera 2 segundos"
++
++  - name: rag-worker
++    rules:
++      - alert: WorkerCaido
++        expr: up{job="worker"} == 0
++        for: 2m
++        labels:
++          severity: critical
++        annotations:
++          summary: "El worker de ingesta no responde al scraping de Prometheus"
++
++      - alert: IngestaConErroresPermanentes
++        expr: sum(increase(ingesta_documentos_total{resultado="error_permanente"}[15m])) > 0
++        labels:
++          severity: warning
++        annotations:
++          summary: "Documentos fallaron de forma permanente durante la ingesta"
++
++      - alert: IngestaConErroresTransitoriosSostenidos
++        expr: sum(increase(ingesta_documentos_total{resultado="error_transitorio"}[15m])) > 3
++        for: 10m
++        labels:
++          severity: warning
++        annotations:
++          summary: "Errores transitorios repetidos en la ingesta; riesgo de envío a la DLQ"
+diff --git a/monitoring/prometheus/prometheus.yml b/monitoring/prometheus/prometheus.yml
+new file mode 100644
+index 0000000..b586e88
+--- /dev/null
++++ b/monitoring/prometheus/prometheus.yml
+@@ -0,0 +1,21 @@
++global:
++  scrape_interval: 15s
++  evaluation_interval: 15s
++
++rule_files:
++  - /etc/prometheus/alert-rules.yml
++
++scrape_configs:
++  - job_name: prometheus
++    static_configs:
++      - targets: ["localhost:9090"]
++
++  - job_name: api
++    metrics_path: /metrics
++    static_configs:
++      - targets: ["api:8000"]
++
++  - job_name: worker
++    metrics_path: /
++    static_configs:
++      - targets: ["worker:9100"]
+-- 
+2.55.0.windows.2
+

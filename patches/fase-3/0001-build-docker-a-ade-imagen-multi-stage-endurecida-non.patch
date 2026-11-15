@@ -1,0 +1,78 @@
+From 9ce45ebe29dfe17bc9740e804a7bf435cb6750af Mon Sep 17 00:00:00 2001
+From: CrysDevv <cryssdev@gmail.com>
+Date: Sun, 15 Nov 2026 15:09:13 -0300
+Subject: [PATCH 1/4] =?UTF-8?q?build(docker):=20a=C3=B1ade=20imagen=20mult?=
+ =?UTF-8?q?i-stage=20endurecida=20non-root=20UID=2010001=20con=20Python=20?=
+ =?UTF-8?q?3.12?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ .dockerignore               | 18 ++++++++++++++++++
+ docker/Dockerfile.python312 | 28 ++++++++++++++++++++++++++++
+ 2 files changed, 46 insertions(+)
+ create mode 100644 .dockerignore
+ create mode 100644 docker/Dockerfile.python312
+
+diff --git a/.dockerignore b/.dockerignore
+new file mode 100644
+index 0000000..67d29f2
+--- /dev/null
++++ b/.dockerignore
+@@ -0,0 +1,18 @@
++.git
++.github
++.env
++.env.*
++!.env.example
++patches/
++monitoring/
++infra/
++db/
++**/__pycache__/
++**/*.pyc
++**/.pytest_cache/
++**/.ruff_cache/
++services/api-fastapi/tests/
++services/api-fastapi/requirements-dev.txt
++*.md
++*.sh
++docker-compose*.yml
+diff --git a/docker/Dockerfile.python312 b/docker/Dockerfile.python312
+new file mode 100644
+index 0000000..14ca149
+--- /dev/null
++++ b/docker/Dockerfile.python312
+@@ -0,0 +1,28 @@
++# syntax=docker/dockerfile:1.7
++# Contexto de construcción esperado: raíz del repositorio (build.context: . / dockerfile: docker/Dockerfile.python312)
++
++FROM python:3.12-slim-bookworm AS builder
++ENV PIP_NO_CACHE_DIR=1 \
++    PIP_DISABLE_PIP_VERSION_CHECK=1 \
++    PYTHONDONTWRITEBYTECODE=1
++WORKDIR /build
++RUN python -m venv /opt/venv
++ENV PATH="/opt/venv/bin:${PATH}"
++COPY services/api-fastapi/requirements.txt ./requirements.txt
++RUN pip install -r requirements.txt
++
++FROM python:3.12-slim-bookworm AS runtime
++ENV PATH="/opt/venv/bin:${PATH}" \
++    PYTHONUNBUFFERED=1 \
++    PYTHONDONTWRITEBYTECODE=1 \
++    TMPDIR=/tmp
++RUN groupadd --gid 10001 app \
++    && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin app
++WORKDIR /app
++COPY --from=builder /opt/venv /opt/venv
++COPY --chown=10001:10001 services/api-fastapi/ /app/
++USER 10001:10001
++EXPOSE 8000
++HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
++    CMD ["python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4).status == 200 else 1)"]
++CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]
+-- 
+2.55.0.windows.2
+
