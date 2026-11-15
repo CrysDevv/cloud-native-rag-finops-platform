@@ -1,0 +1,6 @@
+# Uso: docker compose -f docker-compose.yml -f docker-compose.worker.yml -f docker-compose.monitoring.yml -f docker-compose.auth.yml up -d
+# Exige definir API_KEYS_SHA256 en .env (ver scripts/generar_api_key.py).
+services:
+  api:
+    environment:
+      API_KEYS_SHA256: ${API_KEYS_SHA256:?Definir API_KEYS_SHA256 en .env}
