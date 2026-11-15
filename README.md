@@ -91,3 +91,19 @@ validación de Terraform y Compose.
 
 `v0.1.0` infraestructura base, `v0.2.0` backend y RAG, `v0.2.1` worker de ingesta, `v0.3.0` imagen Docker,
 pipeline y monitoreo, `v0.4.0` pruebas de contrato, operación y documentación.
+
+## Autenticación
+
+Los endpoints `/api/v1/*` aceptan una API key en la cabecera `X-API-Key`. `/health` y `/metrics` permanecen abiertos
+para sondas y Prometheus; publicar `/metrics` fuera de la red interna no es recomendable.
+
+```bash
+python scripts/generar_api_key.py          # imprime la clave y su hash SHA-256
+echo "API_KEYS_SHA256=<hash>" >> .env      # varias claves: hashes separados por coma
+docker compose -f docker-compose.yml -f docker-compose.worker.yml -f docker-compose.monitoring.yml -f docker-compose.auth.yml up -d
+API_KEY=<clave> ./scripts/smoke_test.sh
+```
+
+Solo se almacena el hash. Con `API_KEYS_SHA256` vacío la autenticación queda desactivada (uso local); el archivo
+`docker-compose.auth.yml` impide arrancar sin definirla. Las respuestas 401 usan RFC 7807 y `WWW-Authenticate: ApiKey`.
+La rotación se hace agregando el hash nuevo, migrando a los clientes y retirando el anterior.
