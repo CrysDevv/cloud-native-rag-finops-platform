@@ -1,0 +1,205 @@
+# cloud-native-rag-finops-platform — Infraestructura local (costo $0 USD)
+# Infraestructura base:  docker compose up -d
+# Stack de aplicación:   docker compose --profile app up --build
+name: cloud-native-rag-finops
+
+x-app-env: &app-env
+  APP_ENV: ${APP_ENV:-local}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  DATABASE_URL: ${DATABASE_URL}
+  REDIS_URL: ${REDIS_URL}
+  AWS_REGION: ${AWS_REGION:-us-east-2}
+  AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-2}
+  AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-test}
+  AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-test}
+  AWS_ENDPOINT_URL: ${AWS_ENDPOINT_URL:-http://localstack:4566}
+  S3_BUCKET_DOCUMENTOS: ${S3_BUCKET_DOCUMENTOS:-rag-documentos-local}
+  SQS_QUEUE_INGESTA: ${SQS_QUEUE_INGESTA:-rag-ingesta-queue}
+  SQS_QUEUE_DLQ: ${SQS_QUEUE_DLQ:-rag-ingesta-dlq}
+  SQS_MAX_RECEIVE_COUNT: ${SQS_MAX_RECEIVE_COUNT:-3}
+  EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-local-deterministic}
+  EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-384}
+  LLM_PROVIDER: ${LLM_PROVIDER:-local-extractive}
+  RAG_TOP_K: ${RAG_TOP_K:-5}
+  CHUNK_SIZE: ${CHUNK_SIZE:-800}
+  CHUNK_OVERLAP: ${CHUNK_OVERLAP:-120}
+  PII_ANONYMIZE_ENABLED: ${PII_ANONYMIZE_ENABLED:-true}
+  FINOPS_BUDGET_USD: ${FINOPS_BUDGET_USD:-0}
+  REDIS_QUOTA_REQUESTS_PER_MINUTE: ${REDIS_QUOTA_REQUESTS_PER_MINUTE:-60}
+  OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
+  CORRELATION_ID_HEADER: ${CORRELATION_ID_HEADER:-X-Correlation-ID}
+
+x-hardening: &hardening
+  security_opt:
+    - no-new-privileges:true
+  restart: unless-stopped
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: rag-postgres
+    <<: *hardening
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-rag_finops}
+      POSTGRES_USER: ${POSTGRES_USER:-rag_admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Defina POSTGRES_PASSWORD en .env}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    networks:
+      - rag-net
+
+  redis:
+    image: redis:7-alpine
+    container_name: rag-redis
+    <<: *hardening
+    command:
+      - redis-server
+      - --maxmemory
+      - ${REDIS_MAXMEMORY:-128mb}
+      - --maxmemory-policy
+      - allkeys-lru
+      - --appendonly
+      - "no"
+      - --save
+      - ""
+    ports:
+      - "127.0.0.1:6379:6379"
+    read_only: true
+    tmpfs:
+      - /data
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    networks:
+      - rag-net
+
+  localstack:
+    image: localstack/localstack:3.8
+    container_name: rag-localstack
+    <<: *hardening
+    environment:
+      SERVICES: s3,sqs,secretsmanager
+      DEFAULT_REGION: ${AWS_REGION:-us-east-2}
+      AWS_DEFAULT_REGION: ${AWS_REGION:-us-east-2}
+      DEBUG: "0"
+      PERSISTENCE: "0"
+      S3_BUCKET_DOCUMENTOS: ${S3_BUCKET_DOCUMENTOS:-rag-documentos-local}
+      SQS_QUEUE_INGESTA: ${SQS_QUEUE_INGESTA:-rag-ingesta-queue}
+      SQS_QUEUE_DLQ: ${SQS_QUEUE_DLQ:-rag-ingesta-dlq}
+      SQS_MAX_RECEIVE_COUNT: ${SQS_MAX_RECEIVE_COUNT:-3}
+      SECRETS_DB_NAME: ${SECRETS_DB_NAME:-rag/database}
+      SECRETS_APP_NAME: ${SECRETS_APP_NAME:-rag/app}
+      POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_DB: ${POSTGRES_DB:-rag_finops}
+      POSTGRES_USER: ${POSTGRES_USER:-rag_admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Defina POSTGRES_PASSWORD en .env}
+    ports:
+      - "127.0.0.1:4566:4566"
+    volumes:
+      - ./infra/localstack/init-aws.sh:/etc/localstack/init/ready.d/init-aws.sh:ro
+      - localstack_data:/var/lib/localstack
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:4566/_localstack/health | grep -q '\"sqs\": \"running\"\\|\"sqs\": \"available\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 20s
+    networks:
+      - rag-net
+
+  # ------------------------------------------------------------------
+  # Servicios de aplicación (se activan con: --profile app)
+  # Su código se entrega en las fases 2A, 3A y 3B.
+  # ------------------------------------------------------------------
+  api:
+    profiles: ["app"]
+    build:
+      context: ./services/api-fastapi
+      dockerfile: ../../docker/Dockerfile.python312
+    container_name: rag-api
+    <<: *hardening
+    environment:
+      <<: *app-env
+      OTEL_SERVICE_NAME: api-fastapi
+    ports:
+      - "${API_PORT:-8000}:8000"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+    networks:
+      - rag-net
+
+  worker:
+    profiles: ["app"]
+    build:
+      context: ./services/worker-rag
+      dockerfile: ../../docker/Dockerfile.python312
+    container_name: rag-worker
+    <<: *hardening
+    environment:
+      <<: *app-env
+      OTEL_SERVICE_NAME: worker-rag
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+    networks:
+      - rag-net
+
+  frontend:
+    profiles: ["app"]
+    build:
+      context: ./frontend-react
+      dockerfile: ../docker/Dockerfile.node20
+    container_name: rag-frontend
+    <<: *hardening
+    ports:
+      - "${FRONTEND_PORT:-5173}:8080"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    depends_on:
+      - api
+    networks:
+      - rag-net
+
+networks:
+  rag-net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  localstack_data:
