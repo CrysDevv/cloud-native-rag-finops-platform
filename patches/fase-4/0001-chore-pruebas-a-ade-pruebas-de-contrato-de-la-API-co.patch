@@ -1,0 +1,160 @@
+From 388da31bf55d7a9fea7d6d96dffaf0857bab79fd Mon Sep 17 00:00:00 2001
+From: CrysDevv <cryssdev@gmail.com>
+Date: Sun, 15 Nov 2026 15:25:59 -0300
+Subject: [PATCH 1/4] =?UTF-8?q?chore(pruebas):=20a=C3=B1ade=20pruebas=20de?=
+ =?UTF-8?q?=20contrato=20de=20la=20API=20con=20RFC=207807,=20correlaci?=
+ =?UTF-8?q?=C3=B3n,=20l=C3=ADmite=20de=20tasa=20y=20citas?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ services/api-fastapi/requirements-dev.txt     |   1 +
+ .../api-fastapi/tests/test_api_contrato.py    | 127 ++++++++++++++++++
+ 2 files changed, 128 insertions(+)
+ create mode 100644 services/api-fastapi/tests/test_api_contrato.py
+
+diff --git a/services/api-fastapi/requirements-dev.txt b/services/api-fastapi/requirements-dev.txt
+index 152b054..a575cbd 100644
+--- a/services/api-fastapi/requirements-dev.txt
++++ b/services/api-fastapi/requirements-dev.txt
+@@ -1,2 +1,3 @@
+ -r requirements.txt
+ pytest==8.3.4
++httpx==0.28.1
+diff --git a/services/api-fastapi/tests/test_api_contrato.py b/services/api-fastapi/tests/test_api_contrato.py
+new file mode 100644
+index 0000000..382da46
+--- /dev/null
++++ b/services/api-fastapi/tests/test_api_contrato.py
+@@ -0,0 +1,127 @@
++import os
++import sys
++import uuid
++from pathlib import Path
++
++os.environ.setdefault("OTEL_SDK_DISABLED", "true")
++sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
++
++import pytest
++from fastapi.testclient import TestClient
++
++import main
++from config import get_settings
++from rag_engine import sintetizar
++
++
++class FakeRedis:
++    def __init__(self, falla: bool = False):
++        self.contador = 0
++        self.falla = falla
++
++    async def incr(self, clave):
++        self.contador += 1
++        return self.contador
++
++    async def expire(self, clave, segundos):
++        return True
++
++    async def ping(self):
++        if self.falla:
++            raise ConnectionError("redis caído")
++        return True
++
++
++class FakeSesion:
++    async def __aenter__(self):
++        return self
++
++    async def __aexit__(self, *args):
++        return False
++
++    async def execute(self, *args, **kwargs):
++        return None
++
++
++class FakeGateway:
++    async def verificar_s3(self):
++        return None
++
++
++@pytest.fixture
++def cliente():
++    main.app.state.redis = FakeRedis()
++    main.app.state.sessionmaker = lambda: FakeSesion()
++    main.app.state.gateway = FakeGateway()
++    return TestClient(main.app, raise_server_exceptions=False)
++
++
++def test_health_ok(cliente):
++    r = cliente.get("/health")
++    assert r.status_code == 200
++    assert r.json()["status"] == "ok"
++    assert set(r.json()["componentes"]) == {"postgresql", "redis", "localstack"}
++
++
++def test_health_degradado_si_redis_falla(cliente):
++    main.app.state.redis = FakeRedis(falla=True)
++    r = cliente.get("/health")
++    assert r.status_code == 503
++    assert r.json()["status"] == "degradado"
++    assert r.json()["componentes"]["redis"].startswith("error")
++
++
++def test_correlation_id_generado_y_propagado(cliente):
++    generado = cliente.get("/health").headers["X-Correlation-ID"]
++    assert str(uuid.UUID(generado)) == generado
++    assert cliente.get("/health", headers={"X-Correlation-ID": "abc-123"}).headers["X-Correlation-ID"] == "abc-123"
++
++
++def test_error_404_cumple_rfc_7807(cliente):
++    r = cliente.get("/ruta-inexistente", headers={"X-Correlation-ID": "traza-404"})
++    assert r.status_code == 404
++    assert r.headers["content-type"].startswith("application/problem+json")
++    cuerpo = r.json()
++    assert cuerpo["status"] == 404 and cuerpo["correlation_id"] == "traza-404"
++    assert cuerpo["instance"] == "/ruta-inexistente"
++
++
++def test_validacion_422_como_problem_json(cliente):
++    r = cliente.post("/api/v1/rag/consultar", json={"pregunta": "a"})
++    assert r.status_code == 422
++    assert r.headers["content-type"].startswith("application/problem+json")
++    assert r.json()["errores"]
++
++
++def test_rate_limit_devuelve_429(cliente, monkeypatch):
++    monkeypatch.setattr(get_settings(), "redis_quota_requests_per_minute", 2)
++    assert cliente.get("/ruta-inexistente").status_code == 404
++    assert cliente.get("/ruta-inexistente").status_code == 404
++    r = cliente.get("/ruta-inexistente")
++    assert r.status_code == 429
++    assert r.headers["content-type"].startswith("application/problem+json")
++    assert int(r.headers["Retry-After"]) >= 1
++
++
++def test_metricas_prometheus_expuestas(cliente):
++    cliente.get("/health")
++    r = cliente.get("/metrics")
++    assert r.status_code == 200
++    assert "http_requests_total" in r.text
++
++
++def test_sintetizar_devuelve_citas_verificables():
++    doc = uuid.uuid4()
++    fragmentos = [{
++        "documento_id": doc, "nombre_archivo": "politicas.txt", "pagina": 2, "indice_fragmento": 7,
++        "score": 0.0123, "contenido_anonimizado": "Introducción general. El personal tiene derecho a quince dias habiles de vacaciones anuales.",
++    }]
++    respuesta, citas = sintetizar("dias de vacaciones anuales", fragmentos, 5)
++    assert len(citas) == 1 and "[1]" in respuesta
++    assert citas[0]["documento_id"] == str(doc) and citas[0]["pagina"] == 2 and citas[0]["indice_fragmento"] == 7
++    assert "vacaciones" in citas[0]["extracto"]
++
++
++def test_sintetizar_sin_fragmentos_no_inventa_citas():
++    respuesta, citas = sintetizar("cualquier pregunta", [], 5)
++    assert citas == [] and "No se encontró información suficiente" in respuesta
+-- 
+2.55.0.windows.2
+

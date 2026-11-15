@@ -1,0 +1,210 @@
+From 2427fe9ee38b673616f24db4d73db9464682e878 Mon Sep 17 00:00:00 2001
+From: CrysDevv <cryssdev@gmail.com>
+Date: Sun, 15 Nov 2026 15:26:00 -0300
+Subject: [PATCH 4/4] =?UTF-8?q?docs:=20a=C3=B1ade=20README=20y=20documenta?=
+ =?UTF-8?q?ci=C3=B3n=20de=20arquitectura=20con=20diagramas,=20operaci?=
+ =?UTF-8?q?=C3=B3n=20y=20limitaciones?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ README.md            | 93 ++++++++++++++++++++++++++++++++++++++++++++
+ docs/ARQUITECTURA.md | 85 ++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 178 insertions(+)
+ create mode 100644 README.md
+ create mode 100644 docs/ARQUITECTURA.md
+
+diff --git a/README.md b/README.md
+new file mode 100644
+index 0000000..9d7d913
+--- /dev/null
++++ b/README.md
+@@ -0,0 +1,93 @@
++# cloud-native-rag-finops-platform
++
++Plataforma RAG soberana con control de costos (FinOps), guardrail de privacidad para datos personales chilenos
++(RUT, correo, teléfono, tarjetas y cuentas) y ejecución local sobre LocalStack. Sin dependencias de pago: los
++embeddings y la síntesis de respuestas se calculan localmente.
++
++## Componentes
++
++| Componente | Descripción |
++|---|---|
++| `api` (FastAPI) | Carga de documentos, consulta RAG, resumen FinOps, `/health` y `/metrics`. |
++| `worker` | Consume SQS, extrae texto (PDF, DOCX, HTML, TXT, MD), anonimiza, fragmenta e indexa en pgvector. |
++| PostgreSQL 16 + pgvector | Documentos, fragmentos vectoriales (HNSW + `tsvector` en español), auditoría y métricas FinOps. |
++| Redis 7 | Rate limiting por minuto y caché exacta/semántica de consultas. |
++| LocalStack | S3 (documentos), SQS (cola de ingesta + DLQ) y Secrets Manager. |
++| Prometheus + OTel Collector | Métricas de API y worker, reglas de alerta y recepción de trazas OTLP. |
++
++## Requisitos
++
++- Docker y Docker Compose >= 2.24 (el servicio `worker` usa la etiqueta `!reset`).
++- Python 3.12 solo si se ejecutan las pruebas fuera de Docker.
++- Git Bash en Windows para los scripts `.sh`.
++
++## Arranque rápido
++
++```bash
++cp .env.example .env
++make levantar
++make humo
++```
++
++`make humo` ejecuta `scripts/smoke_test.sh`: verifica salud, sube un documento, espera su indexación, consulta el
++RAG, comprueba que no se expone PII y valida la caché y el resumen FinOps. La API escucha en el puerto 8000
++(`API_URL` permite cambiar el destino).
++
++## Endpoints
++
++| Método | Ruta | Función |
++|---|---|---|
++| GET | `/health` | Estado de PostgreSQL, Redis y LocalStack (200 o 503). |
++| GET | `/metrics` | Métricas Prometheus. |
++| POST | `/api/v1/documentos` | Carga multipart; deduplica por SHA-256, guarda en S3 y encola en SQS. |
++| GET | `/api/v1/documentos` | Lista con filtro `estado`, `limit` y `offset`. |
++| GET | `/api/v1/documentos/{id}` | Estado de ingesta de un documento. |
++| POST | `/api/v1/rag/consultar` | Consulta con citas verificables; anonimiza la pregunta. |
++| GET | `/api/v1/finops/resumen` | Consumo por servicio, presupuesto y estado de colas SQS/DLQ. |
++
++Todos los errores usan RFC 7807 (`application/problem+json`) e incluyen `correlation_id`. El encabezado
++`X-Correlation-ID` se genera si falta, se devuelve en la respuesta, aparece en los logs JSON y viaja como
++atributo del mensaje SQS.
++
++## Ciclo de vida de un documento
++
++`PENDIENTE` -> `PROCESANDO` -> `INDEXADO`. Un fallo permanente (archivo corrupto, cifrado, sin texto, hash
++distinto) deja el documento en `ERROR`. Un fallo transitorio se reintenta con espera creciente; al alcanzar
++`SQS_MAX_RECEIVE_COUNT` el mensaje pasa a la DLQ y el documento se concilia como `DLQ`.
++
++Para reencolar documentos en `ERROR` o `DLQ`:
++
++```bash
++docker compose -f docker-compose.yml -f docker-compose.worker.yml exec worker python -m reprocesar --simular
++docker compose -f docker-compose.yml -f docker-compose.worker.yml exec worker python -m reprocesar --estados DLQ
++```
++
++## Pruebas
++
++```bash
++pip install -r services/api-fastapi/requirements-dev.txt
++make pruebas
++```
++
++El pipeline `.github/workflows/devsecops-pipeline.yml` ejecuta pruebas, Bandit, Gitleaks, hadolint, Trivy y la
++validación de Terraform y Compose.
++
++## Seguridad
++
++- Contenedor non-root (UID 10001), sistema de archivos de solo lectura, `cap_drop: [ALL]` y temporales en `/tmp`.
++- Los textos se anonimizan antes de fragmentarse, indexarse y auditarse; el RUT se valida con módulo 11.
++- Rate limiting por IP y minuto con Redis (`REDIS_QUOTA_REQUESTS_PER_MINUTE`).
++
++## Limitaciones conocidas
++
++- La API no incluye autenticación ni autorización; debe publicarse detrás de un API gateway o proxy con control de acceso.
++- Los embeddings deterministas capturan coincidencias léxicas y de n-gramas, no semántica profunda. Para mayor
++  calidad se debe incorporar un proveedor de embeddings real y actualizar `EMBEDDING_PROVIDER` y `EMBEDDING_DIMENSIONS`.
++- La síntesis `local-extractive` selecciona oraciones de los fragmentos; no redacta ni razona.
++- No hay OCR: los PDF escaneados sin capa de texto terminan en `ERROR`.
++- La caché semántica usa un recorrido acotado de las últimas entradas (no un índice vectorial).
++
++## Versiones
++
++`v0.1.0` infraestructura base, `v0.2.0` backend y RAG, `v0.2.1` worker de ingesta, `v0.3.0` imagen Docker,
++pipeline y monitoreo, `v0.4.0` pruebas de contrato, operación y documentación.
+diff --git a/docs/ARQUITECTURA.md b/docs/ARQUITECTURA.md
+new file mode 100644
+index 0000000..7f63cf6
+--- /dev/null
++++ b/docs/ARQUITECTURA.md
+@@ -0,0 +1,85 @@
++# Arquitectura
++
++## Visión general
++
++```mermaid
++flowchart LR
++    U[Cliente] -->|HTTP| API[API FastAPI]
++    API -->|rate limit y caché| R[(Redis)]
++    API -->|PutObject| S3[(S3 LocalStack)]
++    API -->|SendMessage| Q[[SQS ingesta]]
++    Q -->|ReceiveMessage| W[Worker de ingesta]
++    Q -. maxReceiveCount .-> D[[SQS DLQ]]
++    W -->|GetObject| S3
++    W -->|fragmentos y vectores| PG[(PostgreSQL + pgvector)]
++    API -->|búsqueda híbrida y auditoría| PG
++    API -->|/metrics| P[Prometheus]
++    W -->|:9100| P
++    API -->|OTLP| O[OTel Collector]
++```
++
++## Flujo de ingesta
++
++```mermaid
++sequenceDiagram
++    participant C as Cliente
++    participant A as API
++    participant S as S3
++    participant Q as SQS
++    participant W as Worker
++    participant P as PostgreSQL
++    C->>A: POST /api/v1/documentos
++    A->>A: SHA-256 y verificación de duplicado
++    A->>S: Subir archivo
++    A->>P: INSERT documento PENDIENTE
++    A->>Q: Mensaje con correlation_id
++    A-->>C: 201 documento_id
++    Q->>W: Mensaje
++    W->>P: Reclamar documento (PROCESANDO)
++    W->>S: Descargar y verificar SHA-256
++    W->>W: Extraer, anonimizar PII, fragmentar, embeddings
++    W->>P: Insertar fragmentos y marcar INDEXADO
++    W->>Q: Eliminar mensaje
++```
++
++## Estados del documento
++
++```mermaid
++stateDiagram-v2
++    [*] --> PENDIENTE
++    PENDIENTE --> PROCESANDO: worker reclama
++    PROCESANDO --> INDEXADO: éxito
++    PROCESANDO --> ERROR: fallo permanente o transitorio
++    ERROR --> PROCESANDO: reintento
++    ERROR --> DLQ: intentos agotados
++    DLQ --> PROCESANDO: reprocesar
++    INDEXADO --> [*]
++```
++
++## Consulta RAG
++
++1. La pregunta se anonimiza (RUT con módulo 11, correo, teléfono, tarjeta, cuenta).
++2. Se consulta la caché exacta y luego la semántica (similitud coseno sobre el embedding).
++3. Sin acierto, la búsqueda híbrida combina similitud `pgvector` (`1 - (embedding <=> vec)`) y `ts_rank_cd` en
++   español mediante Reciprocal Rank Fusion ponderada, solo sobre documentos `INDEXADO`.
++4. La síntesis extractiva elige la oración más afín de cada fragmento y devuelve citas con
++   `documento_id`, `nombre_archivo`, `pagina`, `indice_fragmento`, `score` y `extracto`.
++5. Se registra en `auditoria_consultas` y `metricas_finops` (costo estimado: 0 USD).
++
++## Decisiones de diseño
++
++- **Idempotencia**: el worker reclama documentos con `UPDATE ... RETURNING` condicionado al estado; un mensaje
++  duplicado se omite y uno atascado en `PROCESANDO` se recupera tras el tiempo de visibilidad.
++- **Reintentos**: los errores permanentes no se reintentan; los transitorios usan espera exponencial hasta la DLQ.
++- **FinOps**: cada servicio registra consumo en `metricas_finops` con su límite de capa gratuita; el resumen
++  compara el costo acumulado con `FINOPS_BUDGET_USD`.
++- **Solo lectura**: la imagen no escribe fuera de `/tmp` (latido del worker incluido).
++
++## Operación
++
++| Situación | Acción |
++|---|---|
++| Documento en `ERROR` o `DLQ` | `python -m reprocesar --simular`, luego sin `--simular`. |
++| Mensajes acumulados en la DLQ | Revisar `mensaje_error` del documento, corregir la causa y reprocesar. |
++| API degradada (503 en `/health`) | Revisar `componentes` en la respuesta para ubicar el servicio caído. |
++| Alertas | Reglas en `monitoring/prometheus/alert-rules.yml` (API caída, 5xx, latencia p95, worker, ingesta). |
+-- 
+2.55.0.windows.2
+
