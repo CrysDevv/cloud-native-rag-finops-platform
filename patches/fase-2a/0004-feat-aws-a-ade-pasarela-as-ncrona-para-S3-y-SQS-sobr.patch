@@ -1,0 +1,100 @@
+From 5b26a27727fcc89d67771b93b7a6d7c0c0651b94 Mon Sep 17 00:00:00 2001
+From: CrysDevv <cryssdev@gmail.com>
+Date: Sun, 15 Nov 2026 14:48:00 -0300
+Subject: [PATCH 4/6] =?UTF-8?q?feat(aws):=20a=C3=B1ade=20pasarela=20as?=
+ =?UTF-8?q?=C3=ADncrona=20para=20S3=20y=20SQS=20sobre=20LocalStack?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ services/api-fastapi/aws_clients.py | 77 +++++++++++++++++++++++++++++
+ 1 file changed, 77 insertions(+)
+ create mode 100644 services/api-fastapi/aws_clients.py
+
+diff --git a/services/api-fastapi/aws_clients.py b/services/api-fastapi/aws_clients.py
+new file mode 100644
+index 0000000..4765fdb
+--- /dev/null
++++ b/services/api-fastapi/aws_clients.py
+@@ -0,0 +1,77 @@
++import asyncio
++import logging
++from typing import Any
++
++import boto3
++from botocore.config import Config
++
++from config import Settings
++
++logger = logging.getLogger("api.aws")
++
++
++class AwsGateway:
++    def __init__(self, settings: Settings):
++        self.settings = settings
++        cfg = Config(region_name=settings.aws_region, connect_timeout=3, read_timeout=10,
++                     retries={"max_attempts": 3, "mode": "standard"})
++        comunes = dict(
++            region_name=settings.aws_region,
++            endpoint_url=settings.aws_endpoint_url or None,
++            aws_access_key_id=settings.aws_access_key_id,
++            aws_secret_access_key=settings.aws_secret_access_key,
++            config=cfg,
++        )
++        self._s3 = boto3.client("s3", **comunes)
++        self._sqs = boto3.client("sqs", **comunes)
++        self._urls: dict[str, str] = {}
++
++    async def subir_s3(self, key: str, data: bytes, content_type: str, metadata: dict[str, str]) -> None:
++        await asyncio.to_thread(
++            self._s3.put_object,
++            Bucket=self.settings.s3_bucket_documentos, Key=key, Body=data,
++            ContentType=content_type, Metadata=metadata,
++        )
++
++    async def verificar_s3(self) -> None:
++        await asyncio.to_thread(self._s3.head_bucket, Bucket=self.settings.s3_bucket_documentos)
++
++    def _url_cola(self, nombre: str) -> str:
++        if nombre not in self._urls:
++            self._urls[nombre] = self._sqs.get_queue_url(QueueName=nombre)["QueueUrl"]
++        return self._urls[nombre]
++
++    async def publicar_ingesta(self, cuerpo: str, correlation_id: str) -> str:
++        def _enviar() -> str:
++            resp = self._sqs.send_message(
++                QueueUrl=self._url_cola(self.settings.sqs_queue_ingesta),
++                MessageBody=cuerpo,
++                MessageAttributes={
++                    self.settings.correlation_id_header: {"DataType": "String", "StringValue": correlation_id}
++                },
++            )
++            return resp["MessageId"]
++
++        return await asyncio.to_thread(_enviar)
++
++    async def estado_cola(self, nombre: str) -> dict[str, Any]:
++        def _consultar() -> dict[str, Any]:
++            attrs = self._sqs.get_queue_attributes(
++                QueueUrl=self._url_cola(nombre),
++                AttributeNames=["ApproximateNumberOfMessages", "ApproximateNumberOfMessagesNotVisible",
++                                "ApproximateNumberOfMessagesDelayed"],
++            )["Attributes"]
++            return {
++                "nombre": nombre,
++                "estado": "OK",
++                "mensajes_visibles": int(attrs.get("ApproximateNumberOfMessages", 0)),
++                "mensajes_en_vuelo": int(attrs.get("ApproximateNumberOfMessagesNotVisible", 0)),
++                "mensajes_demorados": int(attrs.get("ApproximateNumberOfMessagesDelayed", 0)),
++            }
++
++        try:
++            return await asyncio.to_thread(_consultar)
++        except Exception as exc:
++            logger.warning("No fue posible consultar la cola %s: %s", nombre, type(exc).__name__)
++            return {"nombre": nombre, "estado": "NO_DISPONIBLE", "mensajes_visibles": 0,
++                    "mensajes_en_vuelo": 0, "mensajes_demorados": 0}
+-- 
+2.55.0.windows.2
+
