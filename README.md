@@ -107,3 +107,33 @@ API_KEY=<clave> ./scripts/smoke_test.sh
 Solo se almacena el hash. Con `API_KEYS_SHA256` vacío la autenticación queda desactivada (uso local); el archivo
 `docker-compose.auth.yml` impide arrancar sin definirla. Las respuestas 401 usan RFC 7807 y `WWW-Authenticate: ApiKey`.
 La rotación se hace agregando el hash nuevo, migrando a los clientes y retirando el anterior.
+
+## Puesta en marcha rápida
+
+Requisitos: Docker con Compose >= 2.24 y curl (en Windows, Git for Windows).
+
+```bash
+./setup.sh                    # Linux, macOS o Git Bash
+powershell -ExecutionPolicy Bypass -File .\setup.ps1   # Windows (PowerShell)
+```
+
+El script crea `.env`, construye y levanta API, worker, PostgreSQL, Redis, LocalStack y el frontend, espera a que
+`/health` responda 200 y carga un documento de demostración. Luego abra la interfaz web (por defecto
+`http://localhost:5173`) y consulte, por ejemplo, «¿Cuántos días de vacaciones tengo?».
+
+| Opción | Efecto |
+|---|---|
+| `--auth` | Activa la API key; la clave generada se guarda en `.api_key` y se muestra al final. |
+| `--monitoreo` | Añade Prometheus (`http://localhost:9090`) y OpenTelemetry Collector. |
+| `--sin-demo` | No carga el documento de demostración. |
+| `--reconstruir` | Reconstruye las imágenes sin caché. |
+| `--detener` / `--limpiar` | Detiene los servicios / además borra los volúmenes. |
+
+## Frontend
+
+React 18 + TypeScript + Tailwind servido por nginx sin privilegios (puerto 8080), que además hace de proxy hacia
+`/api/` y `/health` de la API. La clave se guarda solo en `sessionStorage`. Para desarrollo con recarga en caliente:
+`make frontend-dev` (requiere Node 20 y la API en `localhost:8000`).
+
+Limitación: tras el proxy, la API ve la IP de nginx y el límite por minuto se comparte entre todos los usuarios; para
+producción debe confiarse en `X-Forwarded-For` únicamente desde el proxy.
