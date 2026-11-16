@@ -105,4 +105,19 @@ jobs:
       - name: Validar composición de servicios
         run: |
           cp .env.example .env
-          docker compose -f docker-compose.yml -f docker-compose.worker.yml -f docker-compose.monitoring.yml config -q
+          docker compose -f docker-compose.yml -f docker-compose.worker.yml -f docker-compose.build.yml -f docker-compose.fixes.yml -f docker-compose.monitoring.yml --profile app config -q
+
+  frontend:
+    name: Frontend (tipos y build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Instalar dependencias
+        working-directory: frontend-react
+        run: npm install --no-audit --no-fund
+      - name: Comprobar tipos y compilar
+        working-directory: frontend-react
+        run: npm run build

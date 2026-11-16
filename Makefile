@@ -30,3 +30,17 @@ reprocesar:
 validar:
 > cp -n .env.example .env || true
 > $(COMPOSE) config -q
+
+.PHONY: frontend-build frontend-dev
+frontend-build:
+> $(COMPOSE) --profile app build frontend
+
+frontend-dev:
+> cd frontend-react && npm install && npm run dev
+
+.PHONY: setup parar
+setup:
+> ./setup.sh
+
+parar:
+> ./setup.sh --detener

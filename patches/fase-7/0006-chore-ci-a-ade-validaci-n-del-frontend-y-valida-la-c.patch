@@ -1,0 +1,42 @@
+From 250354e31b175f7e7e05797a3c8e926e16aec4bf Mon Sep 17 00:00:00 2001
+From: CrysDevv <cryssdev@gmail.com>
+Date: Sun, 15 Nov 2026 22:48:18 -0300
+Subject: [PATCH 6/7] =?UTF-8?q?chore(ci):=20a=C3=B1ade=20validaci=C3=B3n?=
+ =?UTF-8?q?=20del=20frontend=20y=20valida=20la=20composici=C3=B3n=20con=20?=
+ =?UTF-8?q?los=20mismos=20archivos=20que=20setup.sh?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ .github/workflows/devsecops-pipeline.yml | 17 ++++++++++++++++-
+ 1 file changed, 16 insertions(+), 1 deletion(-)
+
+diff --git a/.github/workflows/devsecops-pipeline.yml b/.github/workflows/devsecops-pipeline.yml
+index 610978e..fb99fe9 100644
+--- a/.github/workflows/devsecops-pipeline.yml
++++ b/.github/workflows/devsecops-pipeline.yml
+@@ -105,4 +105,19 @@ jobs:
+       - name: Validar composición de servicios
+         run: |
+           cp .env.example .env
+-          docker compose -f docker-compose.yml -f docker-compose.worker.yml -f docker-compose.monitoring.yml config -q
++          docker compose -f docker-compose.yml -f docker-compose.worker.yml -f docker-compose.build.yml -f docker-compose.fixes.yml -f docker-compose.monitoring.yml --profile app config -q
++
++  frontend:
++    name: Frontend (tipos y build)
++    runs-on: ubuntu-latest
++    steps:
++      - uses: actions/checkout@v4
++      - uses: actions/setup-node@v4
++        with:
++          node-version: "20"
++      - name: Instalar dependencias
++        working-directory: frontend-react
++        run: npm install --no-audit --no-fund
++      - name: Comprobar tipos y compilar
++        working-directory: frontend-react
++        run: npm run build
+-- 
+2.55.0.windows.2
+

@@ -1,0 +1,6 @@
+# Redis con cap_drop: ALL no puede ejecutar el chown de su entrypoint (CAP_CHOWN).
+# Se arranca directamente como el usuario redis (uid 999, gid 1000 en redis:7-alpine) para omitirlo.
+# No se redefine tmpfs: las listas se concatenan al fusionar y duplicarían el montaje de /data.
+services:
+  redis:
+    user: "999:1000"

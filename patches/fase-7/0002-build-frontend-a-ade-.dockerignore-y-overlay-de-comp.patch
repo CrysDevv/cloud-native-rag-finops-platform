@@ -1,0 +1,57 @@
+From 72446a763d3c34ecee591990690a250aefe2d2b8 Mon Sep 17 00:00:00 2001
+From: CrysDevv <cryssdev@gmail.com>
+Date: Sun, 15 Nov 2026 22:47:48 -0300
+Subject: [PATCH 2/7] =?UTF-8?q?build(frontend):=20a=C3=B1ade=20.dockerigno?=
+ =?UTF-8?q?re=20y=20overlay=20de=20composici=C3=B3n=20del=20servicio=20fro?=
+ =?UTF-8?q?ntend?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ docker-compose.frontend.yml  | 20 ++++++++++++++++++++
+ frontend-react/.dockerignore |  5 +++++
+ 2 files changed, 25 insertions(+)
+ create mode 100644 docker-compose.frontend.yml
+ create mode 100644 frontend-react/.dockerignore
+
+diff --git a/docker-compose.frontend.yml b/docker-compose.frontend.yml
+new file mode 100644
+index 0000000..f34a62c
+--- /dev/null
++++ b/docker-compose.frontend.yml
+@@ -0,0 +1,20 @@
++# Lo incluye setup.sh automáticamente cuando docker-compose.yml no define el servicio "frontend".
++# No se usa read_only: las entradas de arranque de nginx-unprivileged pueden intentar escribir en /etc/nginx.
++services:
++  frontend:
++    build:
++      context: ./frontend-react
++      dockerfile: ../docker/Dockerfile.node20
++    image: rag-frontend:local
++    container_name: rag-frontend
++    depends_on:
++      api:
++        condition: service_started
++    ports:
++      - "${FRONTEND_PORT:-8080}:8080"
++    tmpfs:
++      - /tmp
++    cap_drop: [ALL]
++    security_opt:
++      - no-new-privileges:true
++    restart: unless-stopped
+diff --git a/frontend-react/.dockerignore b/frontend-react/.dockerignore
+new file mode 100644
+index 0000000..2195084
+--- /dev/null
++++ b/frontend-react/.dockerignore
+@@ -0,0 +1,5 @@
++node_modules
++dist
++.git
++*.log
++.env*
+-- 
+2.55.0.windows.2
+

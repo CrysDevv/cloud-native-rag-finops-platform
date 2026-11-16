@@ -41,3 +41,6 @@ volume/
 .vscode/
 .DS_Store
 Thumbs.db
+.api_key
+setup.log
+compose-fusionado.txt
