@@ -1,0 +1,11 @@
+# Corrige el contexto de construcción: el Dockerfile copia services/api-fastapi desde la raíz del repositorio.
+# api y worker comparten la misma imagen base de código (python -m worker para el worker).
+services:
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.python312
+  worker:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.python312
