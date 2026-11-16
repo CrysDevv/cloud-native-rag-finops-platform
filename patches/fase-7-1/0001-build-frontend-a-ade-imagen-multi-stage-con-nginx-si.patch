@@ -1,0 +1,101 @@
+From 61265f60824a316e881859eb8da037a47d090217 Mon Sep 17 00:00:00 2001
+From: CrysDevv <cryssdev@gmail.com>
+Date: Sun, 15 Nov 2026 22:51:08 -0300
+Subject: [PATCH 1/2] =?UTF-8?q?build(frontend):=20a=C3=B1ade=20imagen=20mu?=
+ =?UTF-8?q?lti-stage=20con=20nginx=20sin=20privilegios=20y=20proxy=20hacia?=
+ =?UTF-8?q?=20la=20API?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ docker/Dockerfile.node20  | 18 ++++++++++++++
+ frontend-react/nginx.conf | 51 +++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 69 insertions(+)
+ create mode 100644 docker/Dockerfile.node20
+ create mode 100644 frontend-react/nginx.conf
+
+diff --git a/docker/Dockerfile.node20 b/docker/Dockerfile.node20
+new file mode 100644
+index 0000000..f6d439e
+--- /dev/null
++++ b/docker/Dockerfile.node20
+@@ -0,0 +1,18 @@
++# syntax=docker/dockerfile:1.7
++# Contexto de construcción: ./frontend-react (docker-compose.yml → dockerfile: ../docker/Dockerfile.node20)
++
++FROM node:20-alpine AS build
++WORKDIR /app
++COPY package.json ./
++RUN npm install --no-audit --no-fund
++COPY tsconfig.json vite.config.ts index.html ./
++COPY src ./src
++RUN npm run build
++
++FROM nginxinc/nginx-unprivileged:1.27-alpine AS runtime
++COPY --chown=10001:10001 nginx.conf /etc/nginx/conf.d/default.conf
++COPY --from=build --chown=10001:10001 /app/dist /usr/share/nginx/html
++USER 10001
++EXPOSE 8080
++HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
++  CMD wget -qO- http://127.0.0.1:8080/healthz || exit 1
+diff --git a/frontend-react/nginx.conf b/frontend-react/nginx.conf
+new file mode 100644
+index 0000000..06a1e51
+--- /dev/null
++++ b/frontend-react/nginx.conf
+@@ -0,0 +1,51 @@
++server {
++    listen 8080;
++    server_name _;
++    server_tokens off;
++    root /usr/share/nginx/html;
++    index index.html;
++    client_max_body_size 26m;
++
++    resolver 127.0.0.11 valid=10s ipv6=off;
++
++    add_header X-Content-Type-Options "nosniff" always;
++    add_header X-Frame-Options "DENY" always;
++    add_header Referrer-Policy "no-referrer" always;
++    add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
++    add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'" always;
++
++    location = /healthz {
++        access_log off;
++        default_type text/plain;
++        return 200 "ok\n";
++    }
++
++    location /api/ {
++        set $api_upstream http://api:8000;
++        proxy_pass $api_upstream;
++        proxy_http_version 1.1;
++        proxy_set_header Host $host;
++        proxy_set_header X-Real-IP $remote_addr;
++        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
++        proxy_set_header X-Forwarded-Proto $scheme;
++        proxy_read_timeout 60s;
++    }
++
++    location = /health {
++        set $api_upstream http://api:8000;
++        proxy_pass $api_upstream;
++        proxy_http_version 1.1;
++        proxy_set_header Host $host;
++        proxy_read_timeout 10s;
++    }
++
++    location /assets/ {
++        expires 1y;
++        try_files $uri =404;
++    }
++
++    location / {
++        expires -1;
++        try_files $uri /index.html;
++    }
++}
+-- 
+2.55.0.windows.2
+
