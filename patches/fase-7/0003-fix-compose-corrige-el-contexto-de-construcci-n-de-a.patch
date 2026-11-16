@@ -1,0 +1,49 @@
+From 327d636c0ae3f2403c55e1a520fea8b26953f011 Mon Sep 17 00:00:00 2001
+From: CrysDevv <cryssdev@gmail.com>
+Date: Sun, 15 Nov 2026 22:47:55 -0300
+Subject: [PATCH 3/7] =?UTF-8?q?fix(compose):=20corrige=20el=20contexto=20d?=
+ =?UTF-8?q?e=20construcci=C3=B3n=20de=20api=20y=20worker=20y=20el=20arranq?=
+ =?UTF-8?q?ue=20de=20Redis=20sin=20capacidades?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ docker-compose.build.yml | 11 +++++++++++
+ docker-compose.fixes.yml |  6 ++++++
+ 2 files changed, 17 insertions(+)
+ create mode 100644 docker-compose.build.yml
+ create mode 100644 docker-compose.fixes.yml
+
+diff --git a/docker-compose.build.yml b/docker-compose.build.yml
+new file mode 100644
+index 0000000..c8a0a7a
+--- /dev/null
++++ b/docker-compose.build.yml
+@@ -0,0 +1,11 @@
++# Corrige el contexto de construcción: el Dockerfile copia services/api-fastapi desde la raíz del repositorio.
++# api y worker comparten la misma imagen base de código (python -m worker para el worker).
++services:
++  api:
++    build:
++      context: .
++      dockerfile: docker/Dockerfile.python312
++  worker:
++    build:
++      context: .
++      dockerfile: docker/Dockerfile.python312
+diff --git a/docker-compose.fixes.yml b/docker-compose.fixes.yml
+new file mode 100644
+index 0000000..30b6b23
+--- /dev/null
++++ b/docker-compose.fixes.yml
+@@ -0,0 +1,6 @@
++# Redis con cap_drop: ALL no puede ejecutar el chown de su entrypoint (CAP_CHOWN).
++# Se arranca directamente como el usuario redis (uid 999, gid 1000 en redis:7-alpine) para omitirlo.
++# No se redefine tmpfs: las listas se concatenan al fusionar y duplicarían el montaje de /data.
++services:
++  redis:
++    user: "999:1000"
+-- 
+2.55.0.windows.2
+

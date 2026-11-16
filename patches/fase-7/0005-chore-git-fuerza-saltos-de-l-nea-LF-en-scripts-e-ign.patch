@@ -1,0 +1,28 @@
+From 8dc253ad2d2d4a75882ffe5180404b66e5ba5ebf Mon Sep 17 00:00:00 2001
+From: CrysDevv <cryssdev@gmail.com>
+Date: Sun, 15 Nov 2026 22:48:08 -0300
+Subject: [PATCH 5/7] =?UTF-8?q?chore(git):=20fuerza=20saltos=20de=20l?=
+ =?UTF-8?q?=C3=ADnea=20LF=20en=20scripts=20e=20ignora=20artefactos=20local?=
+ =?UTF-8?q?es,=20.env=20y=20.api=5Fkey?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ .gitignore | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/.gitignore b/.gitignore
+index 84c9ab6..40e7e58 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -41,3 +41,6 @@ volume/
+ .vscode/
+ .DS_Store
+ Thumbs.db
++.api_key
++setup.log
++compose-fusionado.txt
+-- 
+2.55.0.windows.2
+
