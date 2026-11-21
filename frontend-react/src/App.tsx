@@ -28,6 +28,12 @@ const formatoBytes = (n: number | null | undefined): string => {
 };
 const formatoFecha = (iso: string): string => new Date(iso).toLocaleString("es-CL");
 const usd = (n: number): string => `US$ ${n.toFixed(4)}`;
+const idDocumento = (id: string): string => id.replace(/-/g, "").slice(0, 8).toUpperCase();
+const ETIQUETAS_SQS: Record<string, string> = {
+  mensajes_visibles: "Mensajes visibles",
+  mensajes_en_vuelo: "Mensajes en vuelo",
+  mensajes_demorados: "Mensajes demorados",
+};
 
 function Tarjeta({ titulo, children }: { titulo?: string; children: ReactNode }) {
   return (
@@ -211,6 +217,8 @@ function Consulta() {
                     <p className="font-medium">
                       {c.nombre_archivo}{" "}
                       <span className="font-normal text-slate-500">
+                        · DOC-{idDocumento(c.documento_id)}
+                        {c.creado_en ? ` · ${formatoFecha(c.creado_en)}` : ""}
                         · pág. {c.pagina} · fragmento {c.indice_fragmento} · score {c.score.toFixed(4)}
                       </span>
                     </p>
@@ -232,6 +240,8 @@ function Documentos() {
   const [offset, setOffset] = useState(0);
   const [cargando, setCargando] = useState(false);
   const [subiendo, setSubiendo] = useState(false);
+  const [archivoSeleccionado, setArchivoSeleccionado] = useState<File | null>(null);
+  const [arrastrando, setArrastrando] = useState(false);
   const [error, setError] = useState<api.ProblemaError | null>(null);
   const [aviso, setAviso] = useState("");
 
@@ -265,15 +275,15 @@ function Documentos() {
     e.preventDefault();
     const formulario = e.currentTarget;
     const entrada = new FormData(formulario);
-    const archivo = entrada.get("archivo");
-    if (!(archivo instanceof File) || archivo.size === 0) return;
+    if (!archivoSeleccionado || archivoSeleccionado.size === 0) return;
     setSubiendo(true);
     setError(null);
     setAviso("");
     try {
-      const creado = await api.subirDocumento(archivo, String(entrada.get("titulo") ?? ""));
+      const creado = await api.subirDocumento(archivoSeleccionado, String(entrada.get("titulo") ?? ""));
       setAviso(`Documento encolado (${creado.estado}). ID: ${creado.documento_id}`);
       formulario.reset();
+      setArchivoSeleccionado(null);
       setOffset(0);
       await cargar(true);
     } catch (err) {
@@ -288,17 +298,54 @@ function Documentos() {
     <div className="space-y-4">
       <Tarjeta titulo="Subir documento">
         <form onSubmit={subir} className="flex flex-wrap items-end gap-3">
-          <label className="text-sm text-slate-600">
-            Archivo
-            <input name="archivo" type="file" required className="mt-1 block text-sm" />
-          </label>
+          <div className="flex-1">
+            <label
+              htmlFor="archivo-documento"
+              onDragEnter={(e) => {
+                e.preventDefault();
+                setArrastrando(true);
+              }}
+              onDragOver={(e) => e.preventDefault()}
+              onDragLeave={() => setArrastrando(false)}
+              onDrop={(e) => {
+                e.preventDefault();
+                setArrastrando(false);
+                const archivo = e.dataTransfer.files[0];
+                if (archivo) setArchivoSeleccionado(archivo);
+              }}
+              className={`flex min-h-24 cursor-pointer items-center justify-center rounded-lg border border-dashed px-4 py-3 text-center transition ${
+                arrastrando
+                  ? "border-indigo-500 bg-indigo-50"
+                  : "border-slate-300 bg-slate-50 hover:border-slate-400 hover:bg-white"
+              }`}
+            >
+              <span>
+                <span className="block text-sm font-semibold text-slate-700">
+                  {archivoSeleccionado ? archivoSeleccionado.name : "Selecciona un archivo"}
+                </span>
+                <span className="mt-1 block text-xs text-slate-500">
+                  {archivoSeleccionado
+                    ? formatoBytes(archivoSeleccionado.size)
+                    : "Arrastra el documento aquí o haz clic para buscarlo"}
+                </span>
+              </span>
+            </label>
+            <input
+              id="archivo-documento"
+              name="archivo"
+              type="file"
+              required={!archivoSeleccionado}
+              className="sr-only"
+              onChange={(e) => setArchivoSeleccionado(e.target.files?.[0] ?? null)}
+            />
+          </div>
           <label className="text-sm text-slate-600">
             Título (opcional)
             <input name="titulo" type="text" maxLength={300} className="mt-1 block w-64 rounded border border-slate-300 px-2 py-1 text-sm" />
           </label>
           <button
             type="submit"
-            disabled={subiendo}
+            disabled={subiendo || !archivoSeleccionado}
             className="rounded bg-indigo-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
           >
             {subiendo ? "Subiendo…" : "Subir"}
@@ -445,7 +492,7 @@ function Finops() {
                   <dl className="text-sm text-slate-600">
                     {Object.entries(atributos).map(([k, v]) => (
                       <div key={k} className="flex justify-between gap-4 border-b border-slate-100 py-0.5">
-                        <dt>{k}</dt>
+                        <dt>{ETIQUETAS_SQS[k] ?? k}</dt>
                         <dd className="font-mono">{String(v)}</dd>
                       </div>
                     ))}
