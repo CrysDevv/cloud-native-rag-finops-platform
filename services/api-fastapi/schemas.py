@@ -52,6 +52,7 @@ class ConsultaRequest(BaseModel):
 class Cita(BaseModel):
     documento_id: UUID
     nombre_archivo: str
+    creado_en: str | None = None
     pagina: int
     indice_fragmento: int
     score: float
