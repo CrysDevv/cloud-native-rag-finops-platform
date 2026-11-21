@@ -31,8 +31,8 @@ const usd = (n: number): string => `US$ ${n.toFixed(4)}`;
 
 function Tarjeta({ titulo, children }: { titulo?: string; children: ReactNode }) {
   return (
-    <section className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
-      {titulo && <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-slate-500">{titulo}</h2>}
+    <section className="surface p-5">
+      {titulo && <h2 className="mb-4 text-sm font-semibold text-slate-700">{titulo}</h2>}
       {children}
     </section>
   );
@@ -76,7 +76,7 @@ function Salud() {
   const color = salud?.status === "ok" ? "bg-emerald-500" : salud === null ? "bg-slate-300" : "bg-red-500";
   const detalle = salud ? Object.entries(salud.componentes).map(([k, v]) => `${k}: ${v}`).join(" · ") : "Verificando…";
   return (
-    <span className="inline-flex items-center gap-2 text-sm text-slate-600" title={detalle}>
+    <span className="health-copy inline-flex items-center gap-2 text-sm text-slate-600" title={detalle}>
       <span className={`h-2.5 w-2.5 rounded-full ${color}`} aria-hidden="true" />
       API: {salud?.status ?? "verificando"}
     </span>
@@ -99,24 +99,22 @@ function ClaveApi({ alGuardar }: { alGuardar: () => void }) {
     alGuardar();
   };
   return (
-    <form onSubmit={guardar} className="flex flex-wrap items-center gap-2">
-      <label htmlFor="api-key" className="text-sm text-slate-600">
-        X-API-Key
-      </label>
+    <form onSubmit={guardar} className="flex items-center gap-2">
+      <label htmlFor="api-key" className="sr-only">Clave de API</label>
       <input
         id="api-key"
         type="password"
         autoComplete="off"
         value={valor}
         onChange={(e) => setValor(e.target.value)}
-        placeholder={activa ? "Clave activa en esta sesión" : "Opcional si la autenticación está desactivada"}
-        className="w-72 rounded border border-slate-300 px-2 py-1 text-sm"
+        placeholder={activa ? "Clave activa" : "API key"}
+        className="field hidden w-56 px-3 py-2 text-sm sm:block"
       />
-      <button type="submit" className="rounded bg-slate-800 px-3 py-1 text-sm text-white hover:bg-slate-700">
+      <button type="submit" className="secondary-button !min-h-9" aria-label="Guardar clave de API">
         Guardar
       </button>
       {activa && (
-        <button type="button" onClick={limpiar} className="rounded border border-slate-300 px-3 py-1 text-sm hover:bg-slate-100">
+        <button type="button" onClick={limpiar} className="secondary-button !min-h-9" aria-label="Quitar clave de API">
           Quitar
         </button>
       )}
@@ -512,38 +510,92 @@ const PESTANAS: { id: Pestana; etiqueta: string }[] = [
   { id: "finops", etiqueta: "FinOps" },
 ];
 
+const DESCRIPCIONES: Record<Pestana, { titulo: string; descripcion: string }> = {
+  consulta: {
+    titulo: "Consulta RAG",
+    descripcion: "Obtén respuestas verificables a partir de tus documentos.",
+  },
+  documentos: {
+    titulo: "Biblioteca documental",
+    descripcion: "Carga, seguimiento e indexación de fuentes.",
+  },
+  finops: {
+    titulo: "Control de costos",
+    descripcion: "Supervisa consumo, presupuesto y colas de procesamiento.",
+  },
+};
+
+function Icono({ tipo }: { tipo: Pestana }) {
+  if (tipo === "consulta") {
+    return (
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
+        <path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4Z" />
+        <path d="M8 9h8M8 13h5" />
+      </svg>
+    );
+  }
+  if (tipo === "documentos") {
+    return (
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
+        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z" />
+        <path d="M14 2v6h6M8 13h8M8 17h6" />
+      </svg>
+    );
+  }
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
+      <path d="M3 3v18h18" />
+      <path d="m7 16 4-4 3 3 5-7" />
+    </svg>
+  );
+}
+
 function App() {
   const [pestana, setPestana] = useState<Pestana>("consulta");
   const [version, setVersion] = useState(0);
+  const encabezado = DESCRIPCIONES[pestana];
   return (
-    <div className="mx-auto max-w-5xl space-y-5 p-4 sm:p-6">
-      <header className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="text-xl font-semibold">RAG FinOps Platform</h1>
-          <Salud />
+    <div className="app-shell">
+      <aside className="sidebar">
+        <div className="brand-block mb-8 flex items-center gap-3 px-2">
+          <span className="brand-mark">R</span>
+          <div>
+            <p className="m-0 text-sm font-bold text-slate-900">RAG FinOps</p>
+            <p className="mt-0.5 text-xs text-slate-500">Plataforma local</p>
+          </div>
         </div>
-        <ClaveApi alGuardar={() => setVersion((v) => v + 1)} />
-      </header>
-      <nav className="flex gap-1 border-b border-slate-300" aria-label="Secciones">
-        {PESTANAS.map((p) => (
-          <button
-            key={p.id}
-            type="button"
-            onClick={() => setPestana(p.id)}
-            aria-current={pestana === p.id ? "page" : undefined}
-            className={`-mb-px border-b-2 px-4 py-2 text-sm font-medium ${
-              pestana === p.id ? "border-indigo-600 text-indigo-700" : "border-transparent text-slate-500 hover:text-slate-800"
-            }`}
-          >
-            {p.etiqueta}
-          </button>
-        ))}
-      </nav>
-      <main>
-        {pestana === "consulta" && <Consulta key={`c-${version}`} />}
-        {pestana === "documentos" && <Documentos key={`d-${version}`} />}
-        {pestana === "finops" && <Finops key={`f-${version}`} />}
-      </main>
+        <p className="nav-label mb-2 px-3 text-xs font-semibold uppercase tracking-wide text-slate-400">Espacio de trabajo</p>
+        <nav aria-label="Secciones">
+          {PESTANAS.map((p) => (
+            <button
+              key={p.id}
+              type="button"
+              onClick={() => setPestana(p.id)}
+              aria-current={pestana === p.id ? "page" : undefined}
+              className={`nav-button ${pestana === p.id ? "nav-button-active" : ""}`}
+              title={p.etiqueta}
+            >
+              <Icono tipo={p.id} />
+              <span>{p.etiqueta}</span>
+            </button>
+          ))}
+        </nav>
+      </aside>
+      <div className="main-area">
+        <header className="topbar">
+          <Salud />
+          <ClaveApi alGuardar={() => setVersion((v) => v + 1)} />
+        </header>
+        <main className="content">
+          <div className="page-heading">
+            <h2>{encabezado.titulo}</h2>
+            <p>{encabezado.descripcion}</p>
+          </div>
+          {pestana === "consulta" && <Consulta key={`c-${version}`} />}
+          {pestana === "documentos" && <Documentos key={`d-${version}`} />}
+          {pestana === "finops" && <Finops key={`f-${version}`} />}
+        </main>
+      </div>
     </div>
   );
 }
