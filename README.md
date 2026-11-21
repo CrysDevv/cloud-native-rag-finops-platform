@@ -115,6 +115,7 @@ Requisitos: Docker con Compose >= 2.24 y curl (en Windows, Git for Windows).
 ```bash
 ./setup.sh                    # Linux, macOS o Git Bash
 powershell -ExecutionPolicy Bypass -File .\setup.ps1   # Windows (PowerShell)
+./setup.sh --auth             # genera una API key y activa la autenticación
 ```
 
 El script crea `.env`, construye y levanta API, worker, PostgreSQL, Redis, LocalStack y el frontend, espera a que
@@ -134,6 +135,10 @@ El script crea `.env`, construye y levanta API, worker, PostgreSQL, Redis, Local
 React 18 + TypeScript + Tailwind servido por nginx sin privilegios (puerto 8080), que además hace de proxy hacia
 `/api/` y `/health` de la API. La clave se guarda solo en `sessionStorage`. Para desarrollo con recarga en caliente:
 `make frontend-dev` (requiere Node 20 y la API en `localhost:8000`).
+
+La interfaz incluye navegación lateral, una cabecera con estado de la API y un campo de acceso por API key. La
+sección principal dispone de las vistas Consulta RAG, Biblioteca documental y Control de costos, con estilos
+adaptativos para escritorio y dispositivos móviles.
 
 Limitación: tras el proxy, la API ve la IP de nginx y el límite por minuto se comparte entre todos los usuarios; para
 producción debe confiarse en `X-Forwarded-For` únicamente desde el proxy.
