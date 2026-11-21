@@ -110,11 +110,11 @@ function ClaveApi({ alGuardar }: { alGuardar: () => void }) {
         placeholder={activa ? "Clave activa" : "API key"}
         className="field hidden w-56 px-3 py-2 text-sm sm:block"
       />
-      <button type="submit" className="secondary-button !min-h-9" aria-label="Guardar clave de API">
+      <button type="submit" className="secondary-button min-h-9!" aria-label="Guardar clave de API">
         Guardar
       </button>
       {activa && (
-        <button type="button" onClick={limpiar} className="secondary-button !min-h-9" aria-label="Quitar clave de API">
+        <button type="button" onClick={limpiar} className="secondary-button min-h-9!" aria-label="Quitar clave de API">
           Quitar
         </button>
       )}
