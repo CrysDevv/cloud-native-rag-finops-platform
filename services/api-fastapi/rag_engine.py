@@ -86,7 +86,7 @@ WITH vec AS (
         LIMIT :cand
     ) t
 )
-SELECT f.id AS fragmento_id, f.documento_id, d.nombre_archivo, f.pagina, f.indice_fragmento,
+SELECT f.id AS fragmento_id, f.documento_id, d.nombre_archivo, d.creado_en, f.pagina, f.indice_fragmento,
        f.contenido_anonimizado,
        COALESCE(v.sim, 0)::float8 AS similitud,
        COALESCE(l.rango, 0)::float8 AS rango_lexico,
@@ -128,6 +128,9 @@ def sintetizar(pregunta: str, fragmentos: list[dict[str, Any]], top_k: int) -> t
         citas.append({
             "documento_id": str(f["documento_id"]),
             "nombre_archivo": f["nombre_archivo"],
+            "creado_en": (f["creado_en"].isoformat()
+                          if hasattr(f["creado_en"], "isoformat")
+                          else str(f["creado_en"])) if f["creado_en"] is not None else None,
             "pagina": f["pagina"],
             "indice_fragmento": f["indice_fragmento"],
             "score": round(float(f["score"]), 6),
