@@ -40,6 +40,7 @@ export interface DocumentoCreado {
 export interface Cita {
   documento_id: string;
   nombre_archivo: string;
+  creado_en: string | null;
   pagina: number;
   indice_fragmento: number;
   score: number;
