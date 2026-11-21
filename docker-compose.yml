@@ -108,7 +108,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-rag_admin}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Defina POSTGRES_PASSWORD en .env}
     ports:
-      - "127.0.0.1:4566:4566"
+      - "127.0.0.1:${LOCALSTACK_PORT:-4566}:4566"
     volumes:
       - ./infra/localstack/init-aws.sh:/etc/localstack/init/ready.d/init-aws.sh:ro
       - localstack_data:/var/lib/localstack
